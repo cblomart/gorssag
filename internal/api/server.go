@@ -27,6 +27,11 @@ type Server struct {
 func NewServer(agg *aggregator.Aggregator, poller *poller.Poller, cfg *config.Config) *Server {
 	router := gin.Default()
 
+	// Load HTML templates from filesystem (only if SPA is enabled)
+	if cfg.EnableSPA {
+		router.LoadHTMLGlob("internal/web/templates/*")
+	}
+
 	// Setup security middleware
 	securityConfig := &security.SecurityConfig{
 		EnableRateLimit:       cfg.Security.EnableRateLimit,

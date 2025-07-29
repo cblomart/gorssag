@@ -252,12 +252,18 @@ func (p *Poller) fetchFeed(url string) ([]models.Article, error) {
 
 	var articles []models.Article
 	for _, item := range feed.Items {
+		// Safely get author name
+		authorName := ""
+		if item.Author != nil {
+			authorName = item.Author.Name
+		}
+
 		article := models.Article{
 			Title:       item.Title,
 			Link:        item.Link,
 			Description: item.Description,
 			Content:     item.Content,
-			Author:      item.Author.Name,
+			Author:      authorName,
 			Source:      feed.Title,
 			Categories:  []string{},
 			PublishedAt: time.Now(),

@@ -97,10 +97,10 @@ func SetupSecurityMiddleware(router *gin.Engine, config *SecurityConfig) {
 			SSLRedirect:           false, // Set to true in production with HTTPS
 			STSSeconds:            31536000,
 			STSIncludeSubdomains:  true,
-			FrameDeny:             true,
+			FrameDeny:             false, // Allow iframes for Swagger docs
 			ContentTypeNosniff:    true,
 			BrowserXssFilter:      true,
-			ContentSecurityPolicy: "default-src 'self'",
+			ContentSecurityPolicy: "default-src 'self'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:;",
 			ReferrerPolicy:        "strict-origin-when-cross-origin",
 		}))
 	}
