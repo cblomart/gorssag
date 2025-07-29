@@ -42,4 +42,16 @@ Thumbs.db
 
 # Build artifacts
 gorssag
-dist/ 
+dist/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Test data directories
+testdata/
+internal/*/testdata/
+
+# Data directory
+data/ 
