@@ -52,7 +52,6 @@ jobs:
           type=semver,pattern={{major}}.{{minor}}
           type=sha
           type=raw,value=latest,enable={{is_default_branch}}
-          type=raw,value=${{ github.event.inputs.version }},enable={{github.event.inputs.version != ''}}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
@@ -62,4 +61,10 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
-        cache-to: type=gha,mode=max 
+        cache-to: type=gha,mode=max
+
+    - name: Tag with manual version
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+      run: |
+        docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.version }}
+        docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.version }} 
