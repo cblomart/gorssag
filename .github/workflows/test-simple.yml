@@ -1,4 +1,4 @@
-name: Test
+name: Test (Simple)
 
 on:
   push:
@@ -22,18 +22,14 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    - name: Run tests
-      run: go test -v ./...
-
     - name: Run tests with coverage
       run: go test -v -coverprofile=coverage.out ./...
 
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.out
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
-        verbose: true
-      continue-on-error: true 
+    - name: Display coverage
+      run: go tool cover -func=coverage.out
+
+    - name: Build application
+      run: go build -v .
+
+    - name: Test Docker build
+      run: docker build -t gorssag:test . 
