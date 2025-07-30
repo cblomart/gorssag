@@ -162,6 +162,14 @@ func getDefaultFeeds() map[string]TopicConfig {
 			},
 			Filters: []string{"Go", "golang", "programming", "development", "software"},
 		},
+		"cryptos": {
+			URLs: []string{
+				"https://feeds.feedburner.com/TheHackersNews",
+				"https://feeds.npr.org/1001/rss.xml",
+				"https://feeds.bbci.co.uk/news/rss.xml",
+			},
+			Filters: []string{"bitcoin", "btc", "crypto", "cryptocurrency", "ethereum", "blockchain"},
+		},
 	}
 }
 

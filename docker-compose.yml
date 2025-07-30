@@ -30,6 +30,7 @@ services:
       - FEED_TOPIC_TECH=https://feeds.feedburner.com/TechCrunch,https://feeds.arstechnica.com/arstechnica/index,https://feeds.feedburner.com/TheHackersNews|AI,artificial intelligence,machine learning,blockchain,cryptocurrency
       - FEED_TOPIC_NEWS=https://feeds.npr.org/1001/rss.xml,https://feeds.feedburner.com/TheHackersNews,https://feeds.bbci.co.uk/news/rss.xml|technology,innovation,digital,startup,cybersecurity
       - FEED_TOPIC_PROGRAMMING=https://blog.golang.org/feed.atom,https://feeds.feedburner.com/oreilly/go,https://www.reddit.com/r/golang/.rss|Go,golang,programming,development,software
+      - FEED_TOPIC_CRYPTOS=https://feeds.feedburner.com/TheHackersNews,https://feeds.npr.org/1001/rss.xml,https://feeds.bbci.co.uk/news/rss.xml|bitcoin,btc,crypto,cryptocurrency,ethereum,blockchain
     volumes:
       - rss_data:/app/data
     restart: unless-stopped
