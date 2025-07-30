@@ -149,7 +149,6 @@ func getDefaultFeeds() map[string]TopicConfig {
 		"news": {
 			URLs: []string{
 				"https://feeds.npr.org/1001/rss.xml",
-				"https://rss.cnn.com/rss/edition_us.rss",
 				"https://feeds.feedburner.com/TheHackersNews",
 			},
 			Filters: []string{"technology", "innovation", "digital", "startup", "cybersecurity"},
