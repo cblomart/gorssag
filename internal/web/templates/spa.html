@@ -12,15 +12,18 @@
         <!-- Header -->
         <header class="app-header">
             <div class="header-content">
-                <h1><i class="fas fa-rss"></i> RSS Aggregator</h1>
+                <h1><i class="fas fa-newspaper"></i> RSS Aggregator</h1>
+                <nav class="header-nav">
+                    <a href="/" class="nav-link active"><i class="fas fa-home"></i> Home</a>
+                    <a href="/config" class="nav-link"><i class="fas fa-cog"></i> Configuration</a>
+                </nav>
                 <div class="header-actions">
                     <div class="search-container">
                         <input type="text" id="searchInput" placeholder="Search articles..." class="search-input">
                         <i class="fas fa-search search-icon"></i>
                     </div>
-                    <button id="refreshBtn" class="btn btn-outline">
+                    <button id="refreshBtn" class="refresh-button">
                         <i class="fas fa-sync-alt"></i>
-                        Refresh
                     </button>
                 </div>
             </div>

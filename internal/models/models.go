@@ -34,6 +34,25 @@ type FeedInfo struct {
 	ArticleCount int       `json:"article_count"`
 }
 
+// FeedStatus represents the status of a feed
+type FeedStatus struct {
+	URL               string    `json:"url"`
+	Topic             string    `json:"topic"`
+	LastPolled        time.Time `json:"last_polled"`
+	LastError         string    `json:"last_error,omitempty"`
+	IsDisabled        bool      `json:"is_disabled"`
+	DisabledReason    string    `json:"disabled_reason,omitempty"`
+	ArticlesCount     int       `json:"articles_count"`
+	ErrorCount        int       `json:"error_count"`
+	ConsecutiveErrors int       `json:"consecutive_errors"`
+	LastSuccess       time.Time `json:"last_success,omitempty"`
+	NextRetry         time.Time `json:"next_retry,omitempty"`
+	RetryCount        int       `json:"retry_count"`
+	IsContentIssue    bool      `json:"is_content_issue"`             // True if disabled due to content quality
+	UserAgent         string    `json:"user_agent,omitempty"`         // Working User-Agent for this feed
+	TestedUserAgents  []string  `json:"tested_user_agents,omitempty"` // List of User-Agents already tested
+}
+
 // ODataQuery represents OData query parameters
 type ODataQuery struct {
 	Filter   string     `json:"filter"`

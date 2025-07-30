@@ -266,17 +266,15 @@ func (p *Poller) fetchFeed(url string) ([]models.Article, error) {
 		// Convert content to markdown, fallback to description if content is empty
 		content := convertHTMLToMarkdown(item.Content)
 
-		// Multiple fallback strategies to ensure we always have content
+		// Fallback strategy: only use description, never title
 		if content == "" {
 			if description != "" {
 				// Use description as content
 				content = description
-			} else if item.Title != "" {
-				// Use title as minimal content if both content and description are empty
-				content = "# " + item.Title + "\n\n*No additional content available.*"
 			} else {
-				// Last resort: generic content
-				content = "*Content not available*"
+				// Log warning for items with no content and no description
+				log.Printf("WARNING: Feed '%s' has item '%s' with no content and no description - skipping", feed.Title, item.Title)
+				continue
 			}
 		}
 

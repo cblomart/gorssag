@@ -141,8 +141,8 @@ func getDefaultFeeds() map[string]TopicConfig {
 		"tech": {
 			URLs: []string{
 				"https://feeds.feedburner.com/TechCrunch",
-				"http://rss.cnn.com/rss/edition_technology.rss",
 				"https://feeds.arstechnica.com/arstechnica/index",
+				"https://feeds.feedburner.com/TheHackersNews",
 			},
 			Filters: []string{"AI", "artificial intelligence", "machine learning", "blockchain", "cryptocurrency"},
 		},
@@ -150,6 +150,7 @@ func getDefaultFeeds() map[string]TopicConfig {
 			URLs: []string{
 				"https://feeds.npr.org/1001/rss.xml",
 				"https://feeds.feedburner.com/TheHackersNews",
+				"https://feeds.bbci.co.uk/news/rss.xml",
 			},
 			Filters: []string{"technology", "innovation", "digital", "startup", "cybersecurity"},
 		},

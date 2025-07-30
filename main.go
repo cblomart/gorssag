@@ -33,6 +33,9 @@ func main() {
 	// Initialize RSS aggregator
 	agg := aggregator.New(cacheManager, storageManager, cfg.Feeds)
 
+	// Perform initial feed polling to establish status
+	agg.InitializeFeeds()
+
 	// Initialize background poller
 	backgroundPoller := poller.New(agg, cacheManager, storageManager, cfg.Feeds, cfg.PollInterval)
 

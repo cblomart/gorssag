@@ -30,8 +30,9 @@ func (s *SPAServer) RegisterRoutes(router *gin.Engine) {
 
 	log.Println("Registering SPA routes...")
 
-	// Serve the main SPA page
+	// SPA routes
 	router.GET("/", s.serveSPA)
+	router.GET("/config", s.serveConfig) // New configuration page
 
 	// Serve static assets from filesystem
 	router.Static("/static", "./internal/web/static")
@@ -43,6 +44,13 @@ func (s *SPAServer) RegisterRoutes(router *gin.Engine) {
 func (s *SPAServer) serveSPA(c *gin.Context) {
 	c.HTML(http.StatusOK, "spa.html", gin.H{
 		"title":     "RSS Aggregator",
+		"timestamp": time.Now().Unix(), // Add timestamp for cache busting
+	})
+}
+
+func (s *SPAServer) serveConfig(c *gin.Context) {
+	c.HTML(http.StatusOK, "config.html", gin.H{
+		"title":     "Feed Configuration",
 		"timestamp": time.Now().Unix(),
 	})
 }

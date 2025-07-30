@@ -77,6 +77,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/feeds/:topic", s.getAggregatedFeed)
 		api.GET("/feeds/:topic/info", s.getFeedInfo)
 		api.POST("/feeds/:topic/refresh", s.refreshFeed)
+		api.GET("/feeds", s.getFeeds) // New endpoint for feed configuration
 
 		// Poller control endpoints
 		api.GET("/poller/status", s.getPollerStatus)
@@ -568,4 +569,40 @@ func (s *Server) applyAdvancedFilters(articles []models.Article, query *models.O
 	}
 
 	return filtered
+}
+
+// getFeeds returns the current feed configuration and status
+func (s *Server) getFeeds(c *gin.Context) {
+	// Get config from the aggregator
+	cfg := s.aggregator.GetConfig() // cfg is map[string]config.TopicConfig
+	feedHealth := s.aggregator.GetFeedHealth()
+
+	feedStatusResponse := make(map[string]interface{})
+
+	for topic, topicConfig := range cfg { // Iterate directly over the map
+		topicHealth := feedHealth[topic]
+
+		topicStatus := gin.H{
+			"urls":    topicConfig.URLs,
+			"filters": topicConfig.Filters,
+			"feeds":   []gin.H{},
+		}
+
+		// Add health status for each feed URL in this topic
+		for _, health := range topicHealth {
+			topicStatus["feeds"] = append(topicStatus["feeds"].([]gin.H), gin.H{
+				"url":            health.URL,
+				"status":         health.Status,
+				"reason":         health.Reason,
+				"articles_count": health.ArticlesCount,
+				"last_polled":    health.LastPolled,
+			})
+		}
+
+		feedStatusResponse[topic] = topicStatus
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"feeds": feedStatusResponse,
+	})
 }
