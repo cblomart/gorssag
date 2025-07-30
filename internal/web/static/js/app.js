@@ -271,6 +271,7 @@ class RSSAggregator {
         }
     }
 
+    // Render articles
     renderArticles() {
         const articlesContainer = document.getElementById('articlesContainer');
         if (!articlesContainer) return;
@@ -286,38 +287,31 @@ class RSSAggregator {
         }
 
         const articlesHTML = this.articles.map((article, index) => {
-            const isExpanded = this.expandedArticles.has(index);
+            const isExpanded = this.expandedArticles.has(article.id);
             const content = isExpanded ? 
                 this.renderMarkdown(article.content) : 
                 this.getArticlePreview(article.content);
             
             return `
-                <div class="article-card" onclick="app.toggleArticle(${index})">
+                <div class="article-card" data-article-id="${article.id}">
                     <div class="article-header">
                         <div class="article-title">${this.escapeHtml(article.title)}</div>
                         <div class="article-meta">
                             <span class="article-source">${this.escapeHtml(article.source)}</span>
-                            <span class="article-date">${this.formatDate(article.published_at)}</span>
-                            ${article.topic ? `<span class="article-topic">${this.escapeHtml(article.topic)}</span>` : ''}
+                            <span class="article-date">${new Date(article.published_at).toLocaleDateString()}</span>
+                            <span class="article-topic">${this.escapeHtml(article.topic)}</span>
                         </div>
                     </div>
-                    <div class="article-content">
-                        <div class="${isExpanded ? 'article-full-content' : 'article-preview'}">
-                            ${content}
-                        </div>
-                        <div class="article-actions">
-                            <button class="expand-btn" onclick="event.stopPropagation(); app.toggleArticle(${index})">
-                                <i class="fas fa-${isExpanded ? 'compress' : 'expand'}"></i>
-                                ${isExpanded ? 'Collapse' : 'Expand'}
-                            </button>
-                            ${article.link ? `
-                                <a href="${this.escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer" 
-                                   class="read-more-btn" onclick="event.stopPropagation();">
-                                    <i class="fas fa-external-link-alt"></i>
-                                    Read More
-                                </a>
-                            ` : ''}
-                        </div>
+                    <div class="article-content ${isExpanded ? 'expanded' : 'collapsed'}">
+                        ${content}
+                    </div>
+                    <div class="article-actions">
+                        <button class="expand-button" onclick="app.toggleArticle('${article.id}')">
+                            ${isExpanded ? 'Collapse' : 'Expand'}
+                        </button>
+                        <a href="${this.escapeHtml(article.link)}" target="_blank" class="read-more-link">
+                            Read Full Article
+                        </a>
                     </div>
                 </div>
             `;
@@ -326,76 +320,112 @@ class RSSAggregator {
         articlesContainer.innerHTML = articlesHTML;
     }
 
-    getArticlePreview(content, maxLines = 4) {
-        if (!content || content.trim() === '') {
-            return '<em>No content available</em>';
+    // Toggle article expansion
+    toggleArticle(articleId) {
+        console.log('Toggling article:', articleId); // Debug log
+        
+        const articleElement = document.querySelector(`[data-article-id="${articleId}"]`);
+        if (!articleElement) {
+            console.log('Article element not found'); // Debug log
+            return;
+        }
+
+        const contentElement = articleElement.querySelector('.article-content');
+        const expandButton = articleElement.querySelector('.expand-button');
+        
+        if (!contentElement || !expandButton) {
+            console.log('Content or button element not found'); // Debug log
+            return;
         }
         
-        // Convert markdown to plain text for preview
-        let plainText = content
-            .replace(/[#*`\[\]()]/g, '') // Remove markdown syntax
-            .replace(/\n+/g, ' ') // Replace newlines with spaces
-            .replace(/\s+/g, ' ') // Normalize whitespace
-            .trim();
-        
-        // If content is still empty after cleaning, return no content message
-        if (!plainText || plainText.length === 0) {
-            return '<em>No content available</em>';
+        if (this.expandedArticles.has(articleId)) {
+            // Collapse
+            this.expandedArticles.delete(articleId);
+            contentElement.classList.remove('expanded');
+            contentElement.classList.add('collapsed');
+            expandButton.textContent = 'Expand';
+        } else {
+            // Expand
+            this.expandedArticles.add(articleId);
+            contentElement.classList.remove('collapsed');
+            contentElement.classList.add('expanded');
+            expandButton.textContent = 'Collapse';
         }
         
-        const words = plainText.split(' ');
-        const previewWords = words.slice(0, maxLines * 10); // Approximate words per line
-        
-        const preview = previewWords.join(' ') + (words.length > previewWords.length ? '...' : '');
-        return this.escapeHtml(preview);
+        // Re-render the content for this article
+        const article = this.articles.find(a => a.id === articleId);
+        if (article) {
+            const content = this.expandedArticles.has(articleId) ? 
+                this.renderMarkdown(article.content) : 
+                this.getArticlePreview(article.content);
+            contentElement.innerHTML = content;
+        }
     }
 
-    renderMarkdown(text) {
-        if (!text) return '';
+    // Get article preview (first few lines)
+    getArticlePreview(content) {
+        if (!content) return 'No content available';
+        
+        // Clean up the content and get first few lines
+        const lines = content.split('\n').filter(line => line.trim() !== '');
+        const previewLines = lines.slice(0, 3); // Show first 3 non-empty lines
+        
+        return this.renderMarkdown(previewLines.join('\n'));
+    }
+
+    // Render markdown content
+    renderMarkdown(content) {
+        if (!content) return 'No content available';
+        
+        // Clean up empty links first
+        let cleanedContent = content
+            .replace(/\[\]\([^)]*\)/g, '') // Remove empty links like [](http://...)
+            .replace(/\[\[([^\]]*)\]\]\(([^)]*)\)/g, '[$1]($2)') // Fix double brackets
+            .replace(/\[[^\]]*\]\([^)]*\)/g, (match) => {
+                // Extract link text and URL
+                const linkMatch = match.match(/\[([^\]]*)\]\(([^)]*)\)/);
+                if (linkMatch && linkMatch[1].trim() === '') {
+                    return ''; // Remove links with empty text
+                }
+                return match; // Keep links with text
+            });
         
         // Simple markdown rendering
-        return text
+        let html = cleanedContent
             // Headers
             .replace(/^### (.*$)/gim, '<h3>$1</h3>')
             .replace(/^## (.*$)/gim, '<h2>$1</h2>')
             .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-            
-            // Bold and italic
+            // Bold
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            // Italic
             .replace(/\*(.*?)\*/g, '<em>$1</em>')
-            
             // Links
-            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-            
-            // Code blocks
-            .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
-            .replace(/`([^`]+)`/g, '<code>$1</code>')
-            
-            // Blockquotes
-            .replace(/^> (.*$)/gim, '<blockquote>$1</blockquote>')
-            
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
             // Lists
             .replace(/^- (.*$)/gim, '<li>$1</li>')
             .replace(/^(\d+)\. (.*$)/gim, '<li>$2</li>')
-            
-            // Paragraphs
+            // Code blocks
+            .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            // Blockquotes
+            .replace(/^> (.*$)/gim, '<blockquote>$1</blockquote>')
+            // Line breaks - handle them properly
             .replace(/\n\n/g, '</p><p>')
-            .replace(/^(.+)$/gm, '<p>$1</p>')
-            
-            // Clean up empty paragraphs
+            .replace(/\n/g, '<br>');
+        
+        // Wrap in paragraph tags
+        html = '<p>' + html + '</p>';
+        
+        // Clean up empty paragraphs and fix list structure
+        html = html
             .replace(/<p><\/p>/g, '')
             .replace(/<p>(<h[1-6]>.*?<\/h[1-6]>)<\/p>/g, '$1')
             .replace(/<p>(<blockquote>.*?<\/blockquote>)<\/p>/g, '$1')
-            .replace(/<p>(<pre>.*?<\/pre>)<\/p>/g, '$1');
-    }
-
-    toggleArticle(index) {
-        if (this.expandedArticles.has(index)) {
-            this.expandedArticles.delete(index);
-        } else {
-            this.expandedArticles.add(index);
-        }
-        this.renderArticles();
+            .replace(/<p>(<pre>.*?<\/pre>)<\/p>/g, '$1')
+            .replace(/<p>(<li>.*?<\/li>)<\/p>/g, '<ul>$1</ul>');
+        
+        return html;
     }
 
     updateInfiniteScroll() {

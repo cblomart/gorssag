@@ -73,7 +73,7 @@ func (s *Server) setupRoutes() {
 	api := s.router.Group("/api/v1")
 	{
 		api.GET("/topics", s.getTopics)
-		api.GET("/articles", s.getAllArticles) // New endpoint for all articles
+		api.GET("/articles", s.getAllArticles)
 		api.GET("/feeds/:topic", s.getAggregatedFeed)
 		api.GET("/feeds/:topic/info", s.getFeedInfo)
 		api.POST("/feeds/:topic/refresh", s.refreshFeed)
@@ -279,6 +279,9 @@ func (s *Server) getAllArticles(c *gin.Context) {
 		}
 
 		// Apply sorting
+		if query.OrderBy == "" {
+			query.OrderBy = "published_at desc"
+		}
 		if query.OrderBy != "" {
 			allArticles = sortArticles(allArticles, query.OrderBy)
 		}

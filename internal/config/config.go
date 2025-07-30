@@ -148,11 +148,11 @@ func getDefaultFeeds() map[string]TopicConfig {
 		},
 		"news": {
 			URLs: []string{
-				"https://feeds.bbci.co.uk/news/rss.xml",
-				"http://rss.cnn.com/rss/edition.rss",
-				"https://feeds.reuters.com/reuters/topNews",
+				"https://feeds.npr.org/1001/rss.xml",
+				"https://rss.cnn.com/rss/edition_us.rss",
+				"https://feeds.feedburner.com/TheHackersNews",
 			},
-			Filters: []string{"technology", "innovation", "digital", "startup"},
+			Filters: []string{"technology", "innovation", "digital", "startup", "cybersecurity"},
 		},
 		"programming": {
 			URLs: []string{

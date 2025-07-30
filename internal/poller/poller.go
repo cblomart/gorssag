@@ -450,13 +450,15 @@ func convertHTMLToMarkdown(html string) string {
 	text = regexp.MustCompile(`<h5[^>]*>(.*?)</h5>`).ReplaceAllString(text, "##### $1\n\n")
 	text = regexp.MustCompile(`<h6[^>]*>(.*?)</h6>`).ReplaceAllString(text, "###### $1\n\n")
 
-	// Convert bold and italic
+	// Convert strong and bold tags
 	text = regexp.MustCompile(`<strong[^>]*>(.*?)</strong>`).ReplaceAllString(text, "**$1**")
 	text = regexp.MustCompile(`<b[^>]*>(.*?)</b>`).ReplaceAllString(text, "**$1**")
+
+	// Convert emphasis and italic tags
 	text = regexp.MustCompile(`<em[^>]*>(.*?)</em>`).ReplaceAllString(text, "*$1*")
 	text = regexp.MustCompile(`<i[^>]*>(.*?)</i>`).ReplaceAllString(text, "*$1*")
 
-	// Convert links - handle both href and text content, and clean up raw URLs
+	// Convert links
 	text = regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`).ReplaceAllStringFunc(text, func(match string) string {
 		// Extract href and text content
 		hrefMatch := regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`).FindStringSubmatch(match)
@@ -464,8 +466,13 @@ func convertHTMLToMarkdown(html string) string {
 			href := hrefMatch[1]
 			linkText := cleanText(hrefMatch[2])
 
-			// If link text is empty or just the URL, use a descriptive name
-			if linkText == "" || linkText == href {
+			// If link text is empty or just whitespace, skip the link entirely
+			if strings.TrimSpace(linkText) == "" {
+				return ""
+			}
+
+			// If link text is just the URL or a domain, use a descriptive name
+			if linkText == href || strings.Contains(linkText, "://") {
 				// Extract domain name for better readability
 				if strings.Contains(href, "://") {
 					parts := strings.Split(href, "://")
@@ -485,30 +492,28 @@ func convertHTMLToMarkdown(html string) string {
 		return match
 	})
 
-	// Convert lists
+	// Fix double brackets in links (convert [[text]](url) to [text](url))
+	text = regexp.MustCompile(`\[\[([^\]]*)\]\]\(([^)]*)\)`).ReplaceAllString(text, "[$1]($2)")
+
+	// Convert unordered lists with better spacing
 	text = regexp.MustCompile(`<ul[^>]*>(.*?)</ul>`).ReplaceAllStringFunc(text, func(match string) string {
-		// Extract list items and convert them
-		items := regexp.MustCompile(`<li[^>]*>(.*?)</li>`).FindAllStringSubmatch(match, -1)
-		result := ""
-		for _, item := range items {
-			result += "- " + cleanText(item[1]) + "\n"
-		}
-		return result + "\n"
+		content := regexp.MustCompile(`<ul[^>]*>(.*?)</ul>`).ReplaceAllString(match, "$1")
+		content = regexp.MustCompile(`<li[^>]*>(.*?)</li>`).ReplaceAllString(content, "- $1\n")
+		return "\n" + content + "\n"
 	})
 
+	// Convert ordered lists with better spacing
 	text = regexp.MustCompile(`<ol[^>]*>(.*?)</ol>`).ReplaceAllStringFunc(text, func(match string) string {
-		// Extract list items and convert them
-		items := regexp.MustCompile(`<li[^>]*>(.*?)</li>`).FindAllStringSubmatch(match, -1)
-		result := ""
-		for i, item := range items {
-			result += fmt.Sprintf("%d. %s\n", i+1, cleanText(item[1]))
-		}
-		return result + "\n"
+		content := regexp.MustCompile(`<ol[^>]*>(.*?)</ol>`).ReplaceAllString(match, "$1")
+		content = regexp.MustCompile(`<li[^>]*>(.*?)</li>`).ReplaceAllStringFunc(content, func(liMatch string) string {
+			liContent := regexp.MustCompile(`<li[^>]*>(.*?)</li>`).ReplaceAllString(liMatch, "$1")
+			return "1. " + liContent + "\n"
+		})
+		return "\n" + content + "\n"
 	})
 
-	// Convert paragraphs - handle nested content and ensure proper spacing
+	// Convert paragraphs with better spacing
 	text = regexp.MustCompile(`<p[^>]*>(.*?)</p>`).ReplaceAllStringFunc(text, func(match string) string {
-		// Extract content from paragraph and clean it
 		content := regexp.MustCompile(`<p[^>]*>(.*?)</p>`).ReplaceAllString(match, "$1")
 		content = cleanText(content)
 		if content != "" {
@@ -522,23 +527,40 @@ func convertHTMLToMarkdown(html string) string {
 	text = regexp.MustCompile(`<br/>`).ReplaceAllString(text, "\n")
 
 	// Convert blockquotes
-	text = regexp.MustCompile(`<blockquote[^>]*>(.*?)</blockquote>`).ReplaceAllString(text, "> $1\n\n")
-
-	// Convert code blocks
-	text = regexp.MustCompile(`<pre[^>]*>(.*?)</pre>`).ReplaceAllString(text, "```\n$1\n```\n\n")
-	text = regexp.MustCompile(`<code[^>]*>(.*?)</code>`).ReplaceAllString(text, "`$1`")
-
-	// Handle divs and spans that might contain important content
-	text = regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllStringFunc(text, func(match string) string {
-		content := regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllString(match, "$1")
+	text = regexp.MustCompile(`<blockquote[^>]*>(.*?)</blockquote>`).ReplaceAllStringFunc(text, func(match string) string {
+		content := regexp.MustCompile(`<blockquote[^>]*>(.*?)</blockquote>`).ReplaceAllString(match, "$1")
 		content = cleanText(content)
 		if content != "" {
-			return content + "\n"
+			return "\n> " + content + "\n\n"
 		}
 		return ""
 	})
 
-	// Remove remaining HTML tags
+	// Convert pre and code blocks
+	text = regexp.MustCompile(`<pre[^>]*>(.*?)</pre>`).ReplaceAllStringFunc(text, func(match string) string {
+		content := regexp.MustCompile(`<pre[^>]*>(.*?)</pre>`).ReplaceAllString(match, "$1")
+		content = cleanText(content)
+		if content != "" {
+			return "\n```\n" + content + "\n```\n\n"
+		}
+		return ""
+	})
+	text = regexp.MustCompile(`<code[^>]*>(.*?)</code>`).ReplaceAllString(text, "`$1`")
+
+	// Convert divs with better spacing
+	text = regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllStringFunc(text, func(match string) string {
+		content := regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllString(match, "$1")
+		content = cleanText(content)
+		if content != "" {
+			return content + "\n\n"
+		}
+		return ""
+	})
+
+	// Convert spans (just clean the content)
+	text = regexp.MustCompile(`<span[^>]*>(.*?)</span>`).ReplaceAllString(text, "$1")
+
+	// Remove any remaining HTML tags
 	text = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(text, "")
 
 	// Decode common HTML entities
@@ -579,9 +601,15 @@ func convertHTMLToMarkdown(html string) string {
 		}
 	}
 
-	// Final fallback: if we still have nothing but original HTML had content, return a cleaned version
+	// Final cleanup: remove any remaining empty links and clean up whitespace
+	text = regexp.MustCompile(`\[\]\([^)]*\)`).ReplaceAllString(text, "")    // Remove empty links
+	text = regexp.MustCompile(`\n\s*\n\s*\n`).ReplaceAllString(text, "\n\n") // Normalize multiple newlines
+	text = regexp.MustCompile(`\n\s*\n`).ReplaceAllString(text, "\n\n")      // Ensure proper paragraph breaks
+	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")             // Normalize whitespace within lines
+	text = strings.TrimSpace(text)
+
 	if text == "" && originalHTML != "" {
-		// Strip all HTML tags and return plain text
+		// Last resort: if we still have nothing but original HTML had content, return a cleaned version
 		text = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(originalHTML, "")
 		text = strings.TrimSpace(text)
 	}

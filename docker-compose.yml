@@ -28,7 +28,7 @@ services:
       # RSS Feed Configuration
       # Format: FEED_TOPIC_<TOPIC>=url1,url2,url3|filter1,filter2,filter3
       - FEED_TOPIC_TECH=https://feeds.feedburner.com/TechCrunch,https://rss.cnn.com/rss/edition_technology.rss,https://feeds.arstechnica.com/arstechnica/index|AI,artificial intelligence,machine learning,blockchain,cryptocurrency
-      - FEED_TOPIC_NEWS=https://feeds.bbci.co.uk/news/rss.xml,https://rss.cnn.com/rss/edition.rss,https://feeds.reuters.com/reuters/topNews|technology,innovation,digital,startup
+      - FEED_TOPIC_NEWS=https://feeds.npr.org/1001/rss.xml,https://rss.cnn.com/rss/edition_us.rss,https://feeds.feedburner.com/TheHackersNews|technology,innovation,digital,startup,cybersecurity
       - FEED_TOPIC_PROGRAMMING=https://blog.golang.org/feed.atom,https://feeds.feedburner.com/oreilly/go,https://www.reddit.com/r/golang/.rss|Go,golang,programming,development,software
     volumes:
       - rss_data:/app/data
