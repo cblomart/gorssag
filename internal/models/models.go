@@ -14,6 +14,7 @@ type Article struct {
 	PublishedAt time.Time `json:"published_at"`
 	Source      string    `json:"source"`
 	Categories  []string  `json:"categories"`
+	Topic       string    `json:"topic,omitempty"` // Topic this article belongs to
 }
 
 // AggregatedFeed represents an aggregated RSS feed for a topic
@@ -34,12 +35,17 @@ type FeedInfo struct {
 
 // ODataQuery represents OData query parameters
 type ODataQuery struct {
-	Filter  string   `json:"filter"`
-	OrderBy string   `json:"orderby"`
-	Select  []string `json:"select"`
-	Search  []string `json:"search"` // Global search terms (OR logic)
-	Top     int      `json:"top"`
-	Skip    int      `json:"skip"`
+	Filter   string     `json:"filter"`
+	OrderBy  string     `json:"orderby"`
+	Select   []string   `json:"select"`
+	Search   []string   `json:"search"` // Global search terms (OR logic)
+	Top      int        `json:"top"`
+	Skip     int        `json:"skip"`
+	DateFrom *time.Time `json:"date_from,omitempty"`
+	DateTo   *time.Time `json:"date_to,omitempty"`
+	Source   string     `json:"source,omitempty"`
+	Author   string     `json:"author,omitempty"`
+	Category string     `json:"category,omitempty"`
 }
 
 // FilterCriteria represents filter conditions

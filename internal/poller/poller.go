@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -258,11 +259,31 @@ func (p *Poller) fetchFeed(url string) ([]models.Article, error) {
 			authorName = item.Author.Name
 		}
 
+		// Convert description to markdown
+		description := convertHTMLToMarkdown(item.Description)
+
+		// Convert content to markdown, fallback to description if content is empty
+		content := convertHTMLToMarkdown(item.Content)
+
+		// Multiple fallback strategies to ensure we always have content
+		if content == "" {
+			if description != "" {
+				// Use description as content
+				content = description
+			} else if item.Title != "" {
+				// Use title as minimal content if both content and description are empty
+				content = "# " + item.Title + "\n\n*No additional content available.*"
+			} else {
+				// Last resort: generic content
+				content = "*Content not available*"
+			}
+		}
+
 		article := models.Article{
 			Title:       item.Title,
 			Link:        item.Link,
-			Description: item.Description,
-			Content:     item.Content,
+			Description: description,
+			Content:     content,
 			Author:      authorName,
 			Source:      feed.Title,
 			Categories:  []string{},
@@ -283,6 +304,314 @@ func (p *Poller) fetchFeed(url string) ([]models.Article, error) {
 	}
 
 	return articles, nil
+}
+
+// convertHTMLToMarkdown converts HTML content to Markdown for better formatting
+func convertHTMLToMarkdown(html string) string {
+	if html == "" {
+		return ""
+	}
+
+	// Store original HTML for fallback
+	originalHTML := html
+
+	// Remove HTML tags and convert to Markdown
+	text := html
+
+	// Handle CDATA sections first
+	text = regexp.MustCompile(`<!\[CDATA\[(.*?)\]\]>`).ReplaceAllString(text, "$1")
+
+	// Convert images - handle both img tags and img elements within links
+	// First, handle standalone img tags
+	text = regexp.MustCompile(`<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract alt text and use it if meaningful, otherwise skip the image
+		altMatch := regexp.MustCompile(`<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>`).FindStringSubmatch(match)
+		if len(altMatch) >= 3 {
+			altText := strings.TrimSpace(altMatch[2])
+			altTextLower := strings.ToLower(altText)
+			// Only include alt text if it's meaningful and not just a generic description
+			// Skip if it's empty, generic, or just describes the image
+			if altText != "" &&
+				altText != "image" &&
+				altText != "Image" &&
+				!strings.Contains(altTextLower, "image") &&
+				!strings.Contains(altTextLower, "presentation") &&
+				!strings.Contains(altTextLower, "banner") &&
+				!strings.Contains(altTextLower, "header") &&
+				!strings.Contains(altTextLower, "logo") &&
+				!strings.Contains(altTextLower, "icon") &&
+				!strings.Contains(altTextLower, "tech") &&
+				!strings.Contains(altTextLower, "modern") &&
+				!strings.Contains(altTextLower, "futuristic") &&
+				!strings.Contains(altTextLower, "business") &&
+				!strings.Contains(altTextLower, "company") &&
+				len(altText) < 50 { // More restrictive length check
+				return "**" + altText + "**"
+			}
+		}
+		// Remove image if no meaningful alt text
+		return ""
+	})
+	text = regexp.MustCompile(`<img[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*>`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract alt text and use it if meaningful, otherwise skip the image
+		altMatch := regexp.MustCompile(`<img[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*>`).FindStringSubmatch(match)
+		if len(altMatch) >= 3 {
+			altText := strings.TrimSpace(altMatch[1])
+			altTextLower := strings.ToLower(altText)
+			// Only include alt text if it's meaningful and not just a generic description
+			// Skip if it's empty, generic, or just describes the image
+			if altText != "" &&
+				altText != "image" &&
+				altText != "Image" &&
+				!strings.Contains(altTextLower, "image") &&
+				!strings.Contains(altTextLower, "presentation") &&
+				!strings.Contains(altTextLower, "banner") &&
+				!strings.Contains(altTextLower, "header") &&
+				!strings.Contains(altTextLower, "logo") &&
+				!strings.Contains(altTextLower, "icon") &&
+				!strings.Contains(altTextLower, "tech") &&
+				!strings.Contains(altTextLower, "modern") &&
+				!strings.Contains(altTextLower, "futuristic") &&
+				!strings.Contains(altTextLower, "business") &&
+				!strings.Contains(altTextLower, "company") &&
+				len(altText) < 50 { // More restrictive length check
+				return "**" + altText + "**"
+			}
+		}
+		// Remove image if no meaningful alt text
+		return ""
+	})
+	text = regexp.MustCompile(`<img[^>]*src="([^"]*)"[^>]*>`).ReplaceAllString(text, "")
+
+	// Handle images within links (like Blogger's image links) - remove them entirely
+	text = regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>\s*<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>\s*</a>`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract alt text and use it if meaningful, otherwise skip the image link
+		altMatch := regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>\s*<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>\s*</a>`).FindStringSubmatch(match)
+		if len(altMatch) >= 4 {
+			altText := strings.TrimSpace(altMatch[3])
+			altTextLower := strings.ToLower(altText)
+			// Only include alt text if it's meaningful and not just a generic description
+			// Skip if it's empty, generic, or just describes the image
+			if altText != "" &&
+				altText != "image" &&
+				altText != "Image" &&
+				!strings.Contains(altTextLower, "image") &&
+				!strings.Contains(altTextLower, "presentation") &&
+				!strings.Contains(altTextLower, "banner") &&
+				!strings.Contains(altTextLower, "header") &&
+				!strings.Contains(altTextLower, "logo") &&
+				!strings.Contains(altTextLower, "icon") &&
+				!strings.Contains(altTextLower, "tech") &&
+				!strings.Contains(altTextLower, "modern") &&
+				!strings.Contains(altTextLower, "futuristic") &&
+				!strings.Contains(altTextLower, "business") &&
+				!strings.Contains(altTextLower, "company") &&
+				len(altText) < 50 { // More restrictive length check
+				return "**" + altText + "**"
+			}
+		}
+		// Remove image link if no meaningful alt text
+		return ""
+	})
+	text = regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>\s*<img[^>]*src="([^"]*)"[^>]*>\s*</a>`).ReplaceAllString(text, "")
+
+	// Remove any remaining empty image links that might be decorative
+	text = regexp.MustCompile(`\[\]\([^)]*\)`).ReplaceAllString(text, "")
+
+	// Remove any remaining image links that are just domain names (like blogger.googleusercontent.com)
+	text = regexp.MustCompile(`\[[^\]]*\.googleusercontent\.com\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\.blogger\.com\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\.wordpress\.com\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\.medium\.com\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\.substack\.com\]\([^)]*\)`).ReplaceAllString(text, "")
+
+	// More general pattern to remove any image links that contain common image hosting domains
+	text = regexp.MustCompile(`\[[^\]]*googleusercontent[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*blogger[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*wordpress[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*medium[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*substack[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
+
+	// Final cleanup: remove any link that contains image hosting domains in the URL
+	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*googleusercontent[^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*blogger[^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*wordpress[^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*medium[^)]*\)`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*substack[^)]*\)`).ReplaceAllString(text, "")
+
+	// Specific cleanup for the exact pattern we're seeing
+	text = regexp.MustCompile(`\[blogger\.googleusercontent\.com\]\([^)]*\)`).ReplaceAllString(text, "")
+
+	// Convert common HTML elements to Markdown
+	text = regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`).ReplaceAllString(text, "# $1\n\n")
+	text = regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`).ReplaceAllString(text, "## $1\n\n")
+	text = regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`).ReplaceAllString(text, "### $1\n\n")
+	text = regexp.MustCompile(`<h4[^>]*>(.*?)</h4>`).ReplaceAllString(text, "#### $1\n\n")
+	text = regexp.MustCompile(`<h5[^>]*>(.*?)</h5>`).ReplaceAllString(text, "##### $1\n\n")
+	text = regexp.MustCompile(`<h6[^>]*>(.*?)</h6>`).ReplaceAllString(text, "###### $1\n\n")
+
+	// Convert bold and italic
+	text = regexp.MustCompile(`<strong[^>]*>(.*?)</strong>`).ReplaceAllString(text, "**$1**")
+	text = regexp.MustCompile(`<b[^>]*>(.*?)</b>`).ReplaceAllString(text, "**$1**")
+	text = regexp.MustCompile(`<em[^>]*>(.*?)</em>`).ReplaceAllString(text, "*$1*")
+	text = regexp.MustCompile(`<i[^>]*>(.*?)</i>`).ReplaceAllString(text, "*$1*")
+
+	// Convert links - handle both href and text content, and clean up raw URLs
+	text = regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract href and text content
+		hrefMatch := regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`).FindStringSubmatch(match)
+		if len(hrefMatch) >= 3 {
+			href := hrefMatch[1]
+			linkText := cleanText(hrefMatch[2])
+
+			// If link text is empty or just the URL, use a descriptive name
+			if linkText == "" || linkText == href {
+				// Extract domain name for better readability
+				if strings.Contains(href, "://") {
+					parts := strings.Split(href, "://")
+					if len(parts) > 1 {
+						domain := strings.Split(parts[1], "/")[0]
+						linkText = domain
+					} else {
+						linkText = "Link"
+					}
+				} else {
+					linkText = "Link"
+				}
+			}
+
+			return fmt.Sprintf("[%s](%s)", linkText, href)
+		}
+		return match
+	})
+
+	// Convert lists
+	text = regexp.MustCompile(`<ul[^>]*>(.*?)</ul>`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract list items and convert them
+		items := regexp.MustCompile(`<li[^>]*>(.*?)</li>`).FindAllStringSubmatch(match, -1)
+		result := ""
+		for _, item := range items {
+			result += "- " + cleanText(item[1]) + "\n"
+		}
+		return result + "\n"
+	})
+
+	text = regexp.MustCompile(`<ol[^>]*>(.*?)</ol>`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract list items and convert them
+		items := regexp.MustCompile(`<li[^>]*>(.*?)</li>`).FindAllStringSubmatch(match, -1)
+		result := ""
+		for i, item := range items {
+			result += fmt.Sprintf("%d. %s\n", i+1, cleanText(item[1]))
+		}
+		return result + "\n"
+	})
+
+	// Convert paragraphs - handle nested content and ensure proper spacing
+	text = regexp.MustCompile(`<p[^>]*>(.*?)</p>`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract content from paragraph and clean it
+		content := regexp.MustCompile(`<p[^>]*>(.*?)</p>`).ReplaceAllString(match, "$1")
+		content = cleanText(content)
+		if content != "" {
+			return content + "\n\n"
+		}
+		return ""
+	})
+
+	// Convert line breaks
+	text = regexp.MustCompile(`<br[^>]*>`).ReplaceAllString(text, "\n")
+	text = regexp.MustCompile(`<br/>`).ReplaceAllString(text, "\n")
+
+	// Convert blockquotes
+	text = regexp.MustCompile(`<blockquote[^>]*>(.*?)</blockquote>`).ReplaceAllString(text, "> $1\n\n")
+
+	// Convert code blocks
+	text = regexp.MustCompile(`<pre[^>]*>(.*?)</pre>`).ReplaceAllString(text, "```\n$1\n```\n\n")
+	text = regexp.MustCompile(`<code[^>]*>(.*?)</code>`).ReplaceAllString(text, "`$1`")
+
+	// Handle divs and spans that might contain important content
+	text = regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllStringFunc(text, func(match string) string {
+		content := regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllString(match, "$1")
+		content = cleanText(content)
+		if content != "" {
+			return content + "\n"
+		}
+		return ""
+	})
+
+	// Remove remaining HTML tags
+	text = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(text, "")
+
+	// Decode common HTML entities
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&apos;", "'")
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = strings.ReplaceAll(text, "&mdash;", "—")
+	text = strings.ReplaceAll(text, "&ndash;", "–")
+	text = strings.ReplaceAll(text, "&hellip;", "...")
+	text = strings.ReplaceAll(text, "&ldquo;", "\"")
+	text = strings.ReplaceAll(text, "&rdquo;", "\"")
+	text = strings.ReplaceAll(text, "&lsquo;", "'")
+	text = strings.ReplaceAll(text, "&rsquo;", "'")
+
+	// Clean up whitespace and ensure proper paragraph breaks
+	text = regexp.MustCompile(`\n\s*\n\s*\n`).ReplaceAllString(text, "\n\n")
+	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+	text = strings.TrimSpace(text)
+
+	// Add proper line breaks after sentences and improve readability
+	text = regexp.MustCompile(`([.!?])\s+([A-Z])`).ReplaceAllString(text, "$1\n\n$2")
+
+	// Clean up excessive line breaks
+	text = regexp.MustCompile(`\n{3,}`).ReplaceAllString(text, "\n\n")
+
+	// Ensure proper spacing around headers
+	text = regexp.MustCompile(`([^\n])\n(#+\s)`).ReplaceAllString(text, "$1\n\n$2")
+
+	// If the result is still empty after all processing, try to extract any text content
+	if text == "" {
+		// Last resort: extract any text that might be left
+		text = regexp.MustCompile(`[^<>]+`).FindString(originalHTML)
+		if text != "" {
+			text = strings.TrimSpace(text)
+		}
+	}
+
+	// Final fallback: if we still have nothing but original HTML had content, return a cleaned version
+	if text == "" && originalHTML != "" {
+		// Strip all HTML tags and return plain text
+		text = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(originalHTML, "")
+		text = strings.TrimSpace(text)
+	}
+
+	return text
+}
+
+// cleanText removes HTML tags from text content
+func cleanText(html string) string {
+	if html == "" {
+		return ""
+	}
+
+	// Remove HTML tags
+	re := regexp.MustCompile(`<[^>]*>`)
+	text := re.ReplaceAllString(html, "")
+
+	// Decode common HTML entities
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&apos;", "'")
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+
+	// Clean up whitespace
+	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+	text = strings.TrimSpace(text)
+
+	return text
 }
 
 func (p *Poller) GetLastPolledTime() map[string]time.Time {

@@ -3,6 +3,7 @@ package web
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -41,6 +42,7 @@ func (s *SPAServer) RegisterRoutes(router *gin.Engine) {
 // serveSPA serves the main SPA HTML page
 func (s *SPAServer) serveSPA(c *gin.Context) {
 	c.HTML(http.StatusOK, "spa.html", gin.H{
-		"title": "RSS Aggregator",
+		"title":     "RSS Aggregator",
+		"timestamp": time.Now().Unix(),
 	})
 }

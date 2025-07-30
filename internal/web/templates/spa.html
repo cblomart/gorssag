@@ -3,109 +3,67 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RSS Aggregator</title>
+    <title>{{.title}}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link rel="stylesheet" href="/static/css/style.css">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
 <body>
-    <div id="app">
+    <div class="app-container">
         <!-- Header -->
-        <header class="header">
-            <div class="container">
+        <header class="app-header">
+            <div class="header-content">
                 <h1><i class="fas fa-rss"></i> RSS Aggregator</h1>
-                <nav class="nav">
-                    <button id="topicsBtn" class="nav-btn active">Topics</button>
-                    <button id="searchBtn" class="nav-btn">Search</button>
-                    <button id="docsBtn" class="nav-btn">API Docs</button>
-                </nav>
+                <div class="header-actions">
+                    <div class="search-container">
+                        <input type="text" id="searchInput" placeholder="Search articles..." class="search-input">
+                        <i class="fas fa-search search-icon"></i>
+                    </div>
+                    <button id="refreshBtn" class="btn btn-outline">
+                        <i class="fas fa-sync-alt"></i>
+                        Refresh
+                    </button>
+                </div>
             </div>
         </header>
 
         <!-- Main Content -->
-        <main class="main">
-            <div class="container">
-                <!-- Topics View -->
-                <div id="topicsView" class="view active">
-                    <div class="topics-header">
-                        <h2>Available Topics</h2>
-                        <div class="topics-controls">
-                            <button id="refreshTopics" class="btn btn-primary">
-                                <i class="fas fa-sync-alt"></i> Refresh
-                            </button>
-                        </div>
-                    </div>
-                    <div id="topicsList" class="topics-grid">
-                        <!-- Topics will be loaded here -->
+        <main class="app-main">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <h3>Topics</h3>
+                </div>
+                <div id="topicsContainer" class="topics-list">
+                    <!-- Topics will be loaded here -->
+                </div>
+            </aside>
+
+            <!-- Content Area -->
+            <section class="content-area">
+                <!-- Loading Indicator -->
+                <div id="loading" class="loading-overlay" style="display: none;">
+                    <div class="loading-spinner">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Loading...</span>
                     </div>
                 </div>
 
-                <!-- Search View -->
-                <div id="searchView" class="view">
-                    <div class="search-header">
-                        <h2>Search Articles</h2>
-                        <div class="search-form">
-                            <div class="search-input-group">
-                                <input type="text" id="searchInput" placeholder="Search articles..." class="search-input">
-                                <button id="searchSubmit" class="btn btn-primary">
-                                    <i class="fas fa-search"></i> Search
-                                </button>
-                            </div>
-                            <div class="search-filters">
-                                <select id="topicFilter" class="filter-select">
-                                    <option value="">All Topics</option>
-                                </select>
-                                <select id="sortBy" class="filter-select">
-                                    <option value="published_at desc">Newest First</option>
-                                    <option value="published_at asc">Oldest First</option>
-                                    <option value="title asc">Title A-Z</option>
-                                    <option value="title desc">Title Z-A</option>
-                                    <option value="author asc">Author A-Z</option>
-                                    <option value="source asc">Source A-Z</option>
-                                </select>
-                                <input type="number" id="limitResults" placeholder="Limit" value="20" min="1" max="100" class="filter-input">
-                            </div>
-                        </div>
-                    </div>
-                    <div id="searchResults" class="articles-list">
-                        <!-- Search results will be loaded here -->
-                    </div>
-                </div>
+                <!-- Error Display -->
+                <div id="error" class="error-message" style="display: none;"></div>
 
-                <!-- API Docs View -->
-                <div id="docsView" class="view">
-                    <div class="docs-header">
-                        <h2>API Documentation</h2>
-                        <p>Interactive API documentation for developers</p>
-                    </div>
-                    <div class="docs-content">
-                        <iframe id="swaggerFrame" src="/swagger/" frameborder="0"></iframe>
-                    </div>
+                <!-- Articles Container -->
+                <div id="articlesContainer" class="articles-container">
+                    <!-- Articles will be loaded here -->
                 </div>
-            </div>
+                
+                <!-- Infinite Scroll Sentinel -->
+                <div id="infiniteScrollSentinel" class="infinite-scroll-loading" style="display: none;">
+                    <i class="fas fa-spinner fa-spin"></i> Loading more articles...
+                </div>
+            </section>
         </main>
-
-        <!-- Loading Overlay -->
-        <div id="loadingOverlay" class="loading-overlay hidden">
-            <div class="loading-spinner">
-                <i class="fas fa-spinner fa-spin"></i>
-                <p>Loading...</p>
-            </div>
-        </div>
-
-        <!-- Error Modal -->
-        <div id="errorModal" class="modal hidden">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h3>Error</h3>
-                    <button class="modal-close">&times;</button>
-                </div>
-                <div class="modal-body">
-                    <p id="errorMessage"></p>
-                </div>
-            </div>
-        </div>
     </div>
 
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v={{.timestamp}}"></script>
 </body>
 </html> 

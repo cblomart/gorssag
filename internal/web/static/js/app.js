@@ -1,256 +1,453 @@
 // RSS Aggregator SPA Application
-class RSSAggregatorApp {
+class RSSAggregator {
     constructor() {
-        this.currentView = 'topics';
+        this.articles = [];
         this.topics = [];
-        this.init();
+        this.currentPage = 0;
+        this.pageSize = 20;
+        this.hasMore = true;
+        this.loading = false;
+        this.currentView = 'all'; // 'all' or 'topic'
+        this.selectedTopic = null;
+        this.expandedArticles = new Set();
+        this.isLoadingMore = false;
     }
 
     init() {
-        this.bindEvents();
-        this.loadTopics();
-        this.setupNavigation();
+        // Wait a bit to ensure DOM is fully ready
+        setTimeout(() => {
+            this.bindEvents();
+            this.loadTopics();
+            this.loadAllArticles();
+            this.setupNavigation();
+            this.setupInfiniteScroll();
+        }, 100);
     }
 
     bindEvents() {
-        // Navigation
-        document.getElementById('topicsBtn').addEventListener('click', () => this.showView('topics'));
-        document.getElementById('searchBtn').addEventListener('click', () => this.showView('search'));
-        document.getElementById('docsBtn').addEventListener('click', () => this.showView('docs'));
+        try {
+            // Search functionality
+            const searchInput = document.getElementById('searchInput');
+            if (searchInput) {
+                searchInput.addEventListener('input', this.debounce(() => {
+                    this.performSearch();
+                }, 300));
+            }
 
-        // Topics
-        document.getElementById('refreshTopics').addEventListener('click', () => this.loadTopics());
-
-        // Search
-        document.getElementById('searchSubmit').addEventListener('click', () => this.performSearch());
-        document.getElementById('searchInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') this.performSearch();
-        });
-
-        // Modal
-        document.querySelector('.modal-close').addEventListener('click', () => this.hideErrorModal());
-        document.querySelector('.modal').addEventListener('click', (e) => {
-            if (e.target.classList.contains('modal')) this.hideErrorModal();
-        });
-    }
-
-    setupNavigation() {
-        // Load topics into search filter
-        this.loadTopicsForFilter();
-    }
-
-    showView(viewName) {
-        // Update navigation
-        document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-        document.getElementById(viewName + 'Btn').classList.add('active');
-
-        // Update views
-        document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
-        document.getElementById(viewName + 'View').classList.add('active');
-
-        this.currentView = viewName;
-
-        // Load data for view
-        if (viewName === 'topics') {
-            this.loadTopics();
-        } else if (viewName === 'search') {
-            this.loadTopicsForFilter();
+            // Refresh button
+            const refreshBtn = document.getElementById('refreshBtn');
+            if (refreshBtn) {
+                refreshBtn.addEventListener('click', () => {
+                    this.refreshArticles();
+                });
+            }
+        } catch (error) {
+            console.error('Error binding events:', error);
         }
+    }
+
+    setupInfiniteScroll() {
+        this.sentinel = document.getElementById('infiniteScrollSentinel');
+        if (!this.sentinel) return;
+
+        this.observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting && this.hasMore && !this.isLoadingMore && !this.loading) {
+                    this.loadMoreArticles();
+                }
+            });
+        }, {
+            rootMargin: '100px'
+        });
+
+        this.updateInfiniteScroll();
+    }
+
+    debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
     }
 
     async loadTopics() {
-        this.showLoading();
         try {
             const response = await fetch('/api/v1/topics');
-            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            
-            const topics = await response.json();
-            this.topics = topics;
-            this.renderTopics(topics);
-        } catch (error) {
-            this.showError('Failed to load topics: ' + error.message);
-        } finally {
-            this.hideLoading();
-        }
-    }
-
-    async loadTopicsForFilter() {
-        try {
-            const response = await fetch('/api/v1/topics');
-            if (!response.ok) return;
-            
-            const topics = await response.json();
-            this.populateTopicFilter(topics);
-        } catch (error) {
-            console.error('Failed to load topics for filter:', error);
-        }
-    }
-
-    renderTopics(topics) {
-        const container = document.getElementById('topicsList');
-        
-        if (topics.length === 0) {
-            container.innerHTML = `
-                <div class="text-center" style="grid-column: 1 / -1; padding: 2rem;">
-                    <p class="text-muted">No topics available</p>
-                </div>
-            `;
-            return;
-        }
-
-        container.innerHTML = topics.map(topic => `
-            <div class="topic-card" onclick="app.loadTopicArticles('${topic}')">
-                <h3><i class="fas fa-folder"></i> ${this.capitalizeFirst(topic)}</h3>
-                <div class="topic-meta">
-                    <span><i class="fas fa-rss"></i> RSS Feed</span>
-                </div>
-                <div class="topic-actions">
-                    <button class="btn btn-outline" onclick="event.stopPropagation(); app.loadTopicArticles('${topic}')">
-                        <i class="fas fa-eye"></i> View Articles
-                    </button>
-                    <button class="btn btn-secondary" onclick="event.stopPropagation(); app.refreshTopic('${topic}')">
-                        <i class="fas fa-sync-alt"></i> Refresh
-                    </button>
-                </div>
-            </div>
-        `).join('');
-    }
-
-    populateTopicFilter(topics) {
-        const select = document.getElementById('topicFilter');
-        select.innerHTML = '<option value="">All Topics</option>';
-        
-        topics.forEach(topic => {
-            const option = document.createElement('option');
-            option.value = topic;
-            option.textContent = this.capitalizeFirst(topic);
-            select.appendChild(option);
-        });
-    }
-
-    async loadTopicArticles(topic) {
-        this.showLoading();
-        try {
-            const response = await fetch(`/api/v1/feeds/${topic}`);
-            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            
-            const feed = await response.json();
-            this.showSearchViewWithTopic(topic, feed.articles);
-        } catch (error) {
-            this.showError(`Failed to load articles for ${topic}: ${error.message}`);
-        } finally {
-            this.hideLoading();
-        }
-    }
-
-    async refreshTopic(topic) {
-        this.showLoading();
-        try {
-            const response = await fetch(`/api/v1/feeds/${topic}/refresh`, { method: 'POST' });
-            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            
-            // Reload the topic articles
-            await this.loadTopicArticles(topic);
-        } catch (error) {
-            this.showError(`Failed to refresh ${topic}: ${error.message}`);
-        } finally {
-            this.hideLoading();
-        }
-    }
-
-    showSearchViewWithTopic(topic, articles) {
-        this.showView('search');
-        document.getElementById('topicFilter').value = topic;
-        this.renderArticles(articles);
-    }
-
-    async performSearch() {
-        const searchTerm = document.getElementById('searchInput').value.trim();
-        const topic = document.getElementById('topicFilter').value;
-        const sortBy = document.getElementById('sortBy').value;
-        const limit = document.getElementById('limitResults').value;
-
-        if (!searchTerm && !topic) {
-            this.showError('Please enter a search term or select a topic');
-            return;
-        }
-
-        this.showLoading();
-        try {
-            const params = new URLSearchParams();
-            if (searchTerm) params.append('$search', searchTerm);
-            if (topic) params.append('topic', topic);
-            if (sortBy) params.append('$orderby', sortBy);
-            if (limit) params.append('$top', limit);
-
-            const url = topic ? `/api/v1/feeds/${topic}` : '/api/v1/search';
-            const response = await fetch(`${url}?${params.toString()}`);
-            
             if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             
             const data = await response.json();
-            this.renderArticles(data.articles || data);
+            this.topics = data.topics || [];
+            this.renderTopics();
+        } catch (error) {
+            this.showError('Failed to load topics: ' + error.message);
+        }
+    }
+
+    renderTopics() {
+        const topicsContainer = document.getElementById('topicsContainer');
+        if (!topicsContainer) return;
+
+        topicsContainer.innerHTML = `
+            <div class="topic-item ${this.currentView === 'all' ? 'active' : ''}" onclick="app.showAllArticles()">
+                <i class="fas fa-globe"></i>
+                <span>All Articles</span>
+            </div>
+            ${this.topics.map(topic => `
+                <div class="topic-item ${this.currentView === 'topic' && this.selectedTopic === topic ? 'active' : ''}" 
+                     onclick="app.showTopicArticles('${topic}')">
+                    <i class="fas fa-tag"></i>
+                    <span>${topic.charAt(0).toUpperCase() + topic.slice(1)}</span>
+                </div>
+            `).join('')}
+        `;
+    }
+
+    async loadAllArticles(page = 0) {
+        if (this.loading) return;
+        
+        this.loading = true;
+        if (page === 0) {
+            this.showLoading();
+        }
+        
+        try {
+            const skip = page * this.pageSize;
+            const response = await fetch(`/api/v1/articles?$top=${this.pageSize}&$skip=${skip}&$orderby=published_at desc`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            
+            const data = await response.json();
+            
+            if (page === 0) {
+                this.articles = data.articles || [];
+            } else {
+                this.articles = this.articles.concat(data.articles || []);
+            }
+            
+            this.hasMore = data.has_more || false;
+            this.currentPage = page;
+            
+            this.renderArticles();
+            this.updateInfiniteScroll();
+        } catch (error) {
+            this.showError('Failed to load articles: ' + error.message);
+        } finally {
+            this.loading = false;
+            if (page === 0) {
+                this.hideLoading();
+            }
+        }
+    }
+
+    async loadTopicArticles(topic, page = 0) {
+        if (this.loading) return;
+        
+        this.loading = true;
+        if (page === 0) {
+            this.showLoading();
+        }
+        
+        try {
+            const skip = page * this.pageSize;
+            const response = await fetch(`/api/v1/articles?$filter=topic eq '${encodeURIComponent(topic)}'&$top=${this.pageSize}&$skip=${skip}&$orderby=published_at desc`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            
+            const data = await response.json();
+            
+            if (page === 0) {
+                this.articles = data.articles || [];
+            } else {
+                this.articles = this.articles.concat(data.articles || []);
+            }
+            
+            this.hasMore = data.has_more || false;
+            this.currentPage = page;
+            
+            this.renderArticles();
+            this.updateInfiniteScroll();
+        } catch (error) {
+            this.showError('Failed to load topic articles: ' + error.message);
+        } finally {
+            this.loading = false;
+            if (page === 0) {
+                this.hideLoading();
+            }
+        }
+    }
+
+    showAllArticles() {
+        this.currentView = 'all';
+        this.selectedTopic = null;
+        this.currentPage = 0;
+        this.articles = [];
+        this.hasMore = true;
+        this.expandedArticles.clear();
+        this.loadAllArticles(0);
+        this.renderTopics();
+    }
+
+    showTopicArticles(topic) {
+        this.currentView = 'topic';
+        this.selectedTopic = topic;
+        this.currentPage = 0;
+        this.articles = [];
+        this.hasMore = true;
+        this.expandedArticles.clear();
+        this.loadTopicArticles(topic, 0);
+        this.renderTopics();
+    }
+
+    async loadMoreArticles() {
+        if (this.isLoadingMore || !this.hasMore || this.loading) return;
+        
+        this.isLoadingMore = true;
+        this.showInfiniteScrollLoading();
+        
+        try {
+            const nextPage = this.currentPage + 1;
+            
+            if (this.currentView === 'all') {
+                await this.loadAllArticles(nextPage);
+            } else {
+                await this.loadTopicArticles(this.selectedTopic, nextPage);
+            }
+        } catch (error) {
+            this.showError('Failed to load more articles: ' + error.message);
+        } finally {
+            this.isLoadingMore = false;
+            this.hideInfiniteScrollLoading();
+        }
+    }
+
+    async refreshArticles() {
+        if (this.currentView === 'all') {
+            this.showAllArticles();
+        } else {
+            this.showTopicArticles(this.selectedTopic);
+        }
+    }
+
+    async performSearch() {
+        const searchInput = document.getElementById('searchInput');
+        if (!searchInput) return;
+        
+        const query = searchInput.value.trim();
+        
+        if (query.length === 0) {
+            if (this.currentView === 'all') {
+                this.showAllArticles();
+            } else {
+                this.showTopicArticles(this.selectedTopic);
+            }
+            return;
+        }
+        
+        if (this.loading) return;
+        
+        this.loading = true;
+        this.showLoading();
+        
+        try {
+            const response = await fetch(`/api/v1/articles?$search=${encodeURIComponent(query)}&$top=50&$orderby=published_at desc`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            
+            const data = await response.json();
+            this.articles = data.articles || [];
+            this.hasMore = false; // Disable infinite scroll for search results
+            this.currentPage = 0;
+            this.expandedArticles.clear();
+            
+            this.renderArticles();
+            this.updateInfiniteScroll();
         } catch (error) {
             this.showError('Search failed: ' + error.message);
         } finally {
+            this.loading = false;
             this.hideLoading();
         }
     }
 
-    renderArticles(articles) {
-        const container = document.getElementById('searchResults');
-        
-        if (!articles || articles.length === 0) {
-            container.innerHTML = `
-                <div class="text-center" style="padding: 2rem;">
-                    <p class="text-muted">No articles found</p>
+    renderArticles() {
+        const articlesContainer = document.getElementById('articlesContainer');
+        if (!articlesContainer) return;
+
+        if (this.articles.length === 0) {
+            articlesContainer.innerHTML = `
+                <div style="grid-column: 1 / -1; text-align: center; padding: 3rem; color: #666;">
+                    <i class="fas fa-newspaper" style="font-size: 3rem; margin-bottom: 1rem; color: #ccc;"></i>
+                    <p>No articles found</p>
                 </div>
             `;
             return;
         }
 
-        container.innerHTML = articles.map(article => `
-            <div class="article-card">
-                <h3>
-                    <a href="${article.link}" target="_blank" rel="noopener noreferrer">
-                        ${this.escapeHtml(article.title)}
-                    </a>
-                </h3>
-                <div class="article-meta">
-                    ${article.author ? `<span><i class="fas fa-user"></i> ${this.escapeHtml(article.author)}</span>` : ''}
-                    ${article.source ? `<span><i class="fas fa-globe"></i> ${this.escapeHtml(article.source)}</span>` : ''}
-                    ${article.published_at ? `<span><i class="fas fa-calendar"></i> ${this.formatDate(article.published_at)}</span>` : ''}
-                </div>
-                ${article.description ? `<div class="article-description">${this.escapeHtml(article.description)}</div>` : ''}
-                ${article.categories && article.categories.length > 0 ? `
-                    <div class="article-categories">
-                        ${article.categories.map(cat => `<span class="category-tag">${this.escapeHtml(cat)}</span>`).join('')}
+        const articlesHTML = this.articles.map((article, index) => {
+            const isExpanded = this.expandedArticles.has(index);
+            const content = isExpanded ? 
+                this.renderMarkdown(article.content) : 
+                this.getArticlePreview(article.content);
+            
+            return `
+                <div class="article-card" onclick="app.toggleArticle(${index})">
+                    <div class="article-header">
+                        <div class="article-title">${this.escapeHtml(article.title)}</div>
+                        <div class="article-meta">
+                            <span class="article-source">${this.escapeHtml(article.source)}</span>
+                            <span class="article-date">${this.formatDate(article.published_at)}</span>
+                            ${article.topic ? `<span class="article-topic">${this.escapeHtml(article.topic)}</span>` : ''}
+                        </div>
                     </div>
-                ` : ''}
-            </div>
-        `).join('');
+                    <div class="article-content">
+                        <div class="${isExpanded ? 'article-full-content' : 'article-preview'}">
+                            ${content}
+                        </div>
+                        <div class="article-actions">
+                            <button class="expand-btn" onclick="event.stopPropagation(); app.toggleArticle(${index})">
+                                <i class="fas fa-${isExpanded ? 'compress' : 'expand'}"></i>
+                                ${isExpanded ? 'Collapse' : 'Expand'}
+                            </button>
+                            ${article.link ? `
+                                <a href="${this.escapeHtml(article.link)}" target="_blank" rel="noopener noreferrer" 
+                                   class="read-more-btn" onclick="event.stopPropagation();">
+                                    <i class="fas fa-external-link-alt"></i>
+                                    Read More
+                                </a>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        articlesContainer.innerHTML = articlesHTML;
     }
 
-    // Utility methods
+    getArticlePreview(content, maxLines = 4) {
+        if (!content || content.trim() === '') {
+            return '<em>No content available</em>';
+        }
+        
+        // Convert markdown to plain text for preview
+        let plainText = content
+            .replace(/[#*`\[\]()]/g, '') // Remove markdown syntax
+            .replace(/\n+/g, ' ') // Replace newlines with spaces
+            .replace(/\s+/g, ' ') // Normalize whitespace
+            .trim();
+        
+        // If content is still empty after cleaning, return no content message
+        if (!plainText || plainText.length === 0) {
+            return '<em>No content available</em>';
+        }
+        
+        const words = plainText.split(' ');
+        const previewWords = words.slice(0, maxLines * 10); // Approximate words per line
+        
+        const preview = previewWords.join(' ') + (words.length > previewWords.length ? '...' : '');
+        return this.escapeHtml(preview);
+    }
+
+    renderMarkdown(text) {
+        if (!text) return '';
+        
+        // Simple markdown rendering
+        return text
+            // Headers
+            .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+            .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+            .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+            
+            // Bold and italic
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*(.*?)\*/g, '<em>$1</em>')
+            
+            // Links
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+            
+            // Code blocks
+            .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            
+            // Blockquotes
+            .replace(/^> (.*$)/gim, '<blockquote>$1</blockquote>')
+            
+            // Lists
+            .replace(/^- (.*$)/gim, '<li>$1</li>')
+            .replace(/^(\d+)\. (.*$)/gim, '<li>$2</li>')
+            
+            // Paragraphs
+            .replace(/\n\n/g, '</p><p>')
+            .replace(/^(.+)$/gm, '<p>$1</p>')
+            
+            // Clean up empty paragraphs
+            .replace(/<p><\/p>/g, '')
+            .replace(/<p>(<h[1-6]>.*?<\/h[1-6]>)<\/p>/g, '$1')
+            .replace(/<p>(<blockquote>.*?<\/blockquote>)<\/p>/g, '$1')
+            .replace(/<p>(<pre>.*?<\/pre>)<\/p>/g, '$1');
+    }
+
+    toggleArticle(index) {
+        if (this.expandedArticles.has(index)) {
+            this.expandedArticles.delete(index);
+        } else {
+            this.expandedArticles.add(index);
+        }
+        this.renderArticles();
+    }
+
+    updateInfiniteScroll() {
+        if (!this.sentinel) return;
+        
+        if (this.hasMore) {
+            this.sentinel.style.display = 'block';
+            this.observer.observe(this.sentinel);
+        } else {
+            this.sentinel.style.display = 'none';
+            this.observer.unobserve(this.sentinel);
+        }
+    }
+
+    showInfiniteScrollLoading() {
+        if (this.sentinel) {
+            this.sentinel.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading more articles...';
+            this.sentinel.style.display = 'block';
+        }
+    }
+
+    hideInfiniteScrollLoading() {
+        if (this.sentinel) {
+            this.sentinel.innerHTML = '';
+            this.sentinel.style.display = 'none';
+        }
+    }
+
+    setupNavigation() {
+        // Add any navigation setup here
+    }
+
     showLoading() {
-        document.getElementById('loadingOverlay').classList.remove('hidden');
+        const loadingEl = document.getElementById('loading');
+        if (loadingEl) loadingEl.style.display = 'block';
     }
 
     hideLoading() {
-        document.getElementById('loadingOverlay').classList.add('hidden');
+        const loadingEl = document.getElementById('loading');
+        if (loadingEl) loadingEl.style.display = 'none';
     }
 
     showError(message) {
-        document.getElementById('errorMessage').textContent = message;
-        document.getElementById('errorModal').classList.remove('hidden');
-    }
-
-    hideErrorModal() {
-        document.getElementById('errorModal').classList.add('hidden');
-    }
-
-    capitalizeFirst(str) {
-        return str.charAt(0).toUpperCase() + str.slice(1);
+        const errorEl = document.getElementById('error');
+        if (errorEl) {
+            errorEl.textContent = message;
+            errorEl.style.display = 'block';
+            setTimeout(() => {
+                errorEl.style.display = 'none';
+            }, 5000);
+        }
+        console.error(message);
     }
 
     escapeHtml(text) {
@@ -261,11 +458,26 @@ class RSSAggregatorApp {
 
     formatDate(dateString) {
         const date = new Date(dateString);
-        return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
     }
 }
 
-// Initialize the application when DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
-    window.app = new RSSAggregatorApp();
-}); 
+// Initialize the app
+let app;
+
+function initializeApp() {
+    try {
+        app = new RSSAggregator();
+        app.init();
+    } catch (error) {
+        console.error('Failed to initialize RSS Aggregator:', error);
+    }
+}
+
+// Wait for DOM to be ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeApp);
+} else {
+    // DOM is already ready
+    initializeApp();
+} 
