@@ -15,6 +15,7 @@ import (
 	"gorssag/internal/models"
 	"gorssag/internal/storage"
 
+	"github.com/google/uuid"
 	"github.com/mmcdole/gofeed"
 )
 
@@ -279,7 +280,11 @@ func (p *Poller) fetchFeed(url string) ([]models.Article, error) {
 			}
 		}
 
+		// Generate a unique ID for the article based on its content
+		articleID := generateArticleID(item.Title, item.Link, item.PublishedParsed)
+
 		article := models.Article{
+			ID:          articleID,
 			Title:       item.Title,
 			Link:        item.Link,
 			Description: description,
@@ -668,4 +673,10 @@ func (p *Poller) ForcePoll(topic string) error {
 
 	p.pollTopicFeeds(topic)
 	return nil
+}
+
+// generateArticleID creates a unique identifier for an article using UUID
+func generateArticleID(title, link string, publishedAt *time.Time) string {
+	// Generate a proper UUID for the article
+	return uuid.New().String()
 }

@@ -6,6 +6,7 @@ import (
 
 // Article represents a single RSS article
 type Article struct {
+	ID          string    `json:"id"` // Unique identifier for the article
 	Title       string    `json:"title"`
 	Link        string    `json:"link"`
 	Description string    `json:"description"`

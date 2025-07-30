@@ -287,11 +287,7 @@ class RSSAggregator {
         }
 
         const articlesHTML = this.articles.map((article, index) => {
-            const isExpanded = this.expandedArticles.has(article.id);
-            const content = isExpanded ? 
-                this.renderMarkdown(article.content) : 
-                this.getArticlePreview(article.content);
-            
+            const preview = this.getArticlePreview(article.content);
             return `
                 <div class="article-card" data-article-id="${article.id}">
                     <div class="article-header">
@@ -302,12 +298,12 @@ class RSSAggregator {
                             <span class="article-topic">${this.escapeHtml(article.topic)}</span>
                         </div>
                     </div>
-                    <div class="article-content ${isExpanded ? 'expanded' : 'collapsed'}">
-                        ${content}
+                    <div class="article-content collapsed">
+                        ${preview}
                     </div>
                     <div class="article-actions">
-                        <button class="expand-button" onclick="app.toggleArticle('${article.id}')">
-                            ${isExpanded ? 'Collapse' : 'Expand'}
+                        <button class="readmore-button" data-article-id="${article.id}" type="button">
+                            Read More
                         </button>
                         <a href="${this.escapeHtml(article.link)}" target="_blank" class="read-more-link">
                             Read Full Article
@@ -318,48 +314,85 @@ class RSSAggregator {
         }).join('');
 
         articlesContainer.innerHTML = articlesHTML;
+        this.bindArticleEvents();
     }
 
-    // Toggle article expansion
-    toggleArticle(articleId) {
-        console.log('Toggling article:', articleId); // Debug log
-        
-        const articleElement = document.querySelector(`[data-article-id="${articleId}"]`);
-        if (!articleElement) {
-            console.log('Article element not found'); // Debug log
-            return;
-        }
+    // Bind events specifically for articles and modal
+    bindArticleEvents() {
+        const articlesContainer = document.getElementById('articlesContainer');
+        if (!articlesContainer) return;
 
-        const contentElement = articleElement.querySelector('.article-content');
-        const expandButton = articleElement.querySelector('.expand-button');
-        
-        if (!contentElement || !expandButton) {
-            console.log('Content or button element not found'); // Debug log
-            return;
+        // Remove any existing event listeners
+        const readMoreButtons = articlesContainer.querySelectorAll('.readmore-button');
+        readMoreButtons.forEach(button => {
+            const newButton = button.cloneNode(true);
+            button.parentNode.replaceChild(newButton, button);
+        });
+
+        // Add new event listeners
+        const newReadMoreButtons = articlesContainer.querySelectorAll('.readmore-button');
+        newReadMoreButtons.forEach(button => {
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const articleId = button.getAttribute('data-article-id');
+                if (articleId) {
+                    this.showArticleModal(articleId);
+                }
+            });
+        });
+
+        // Modal close button
+        const modal = document.getElementById('articleModal');
+        const closeBtn = document.getElementById('modalCloseBtn');
+        if (closeBtn) {
+            closeBtn.onclick = () => this.hideArticleModal();
         }
-        
-        if (this.expandedArticles.has(articleId)) {
-            // Collapse
-            this.expandedArticles.delete(articleId);
-            contentElement.classList.remove('expanded');
-            contentElement.classList.add('collapsed');
-            expandButton.textContent = 'Expand';
-        } else {
-            // Expand
-            this.expandedArticles.add(articleId);
-            contentElement.classList.remove('collapsed');
-            contentElement.classList.add('expanded');
-            expandButton.textContent = 'Collapse';
+        // Click outside modal content
+        if (modal) {
+            modal.onclick = (e) => {
+                if (e.target === modal) this.hideArticleModal();
+            };
         }
-        
-        // Re-render the content for this article
+        // Escape key
+        document.onkeydown = (e) => {
+            if (e.key === 'Escape') this.hideArticleModal();
+        };
+    }
+
+    // Show article in modal
+    showArticleModal(articleId) {
         const article = this.articles.find(a => a.id === articleId);
-        if (article) {
-            const content = this.expandedArticles.has(articleId) ? 
-                this.renderMarkdown(article.content) : 
-                this.getArticlePreview(article.content);
-            contentElement.innerHTML = content;
-        }
+        if (!article) return;
+        const modal = document.getElementById('articleModal');
+        const modalHeader = document.getElementById('modalArticleHeader');
+        const modalContent = document.getElementById('modalArticleContent');
+        if (!modal || !modalHeader || !modalContent) return;
+        
+        // Set modal header with article metadata
+        modalHeader.innerHTML = `
+            <div class="modal-article-title">${this.escapeHtml(article.title)}</div>
+            <div class="modal-article-meta">
+                <span class="modal-article-source">${this.escapeHtml(article.source)}</span>
+                <span class="modal-article-date">${new Date(article.published_at).toLocaleDateString()}</span>
+                <span class="modal-article-topic">${this.escapeHtml(article.topic)}</span>
+            </div>
+        `;
+        
+        // Set modal content
+        modalContent.innerHTML = this.renderMarkdown(article.content);
+        modal.classList.add('show');
+        modal.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+    }
+
+    // Hide modal
+    hideArticleModal() {
+        const modal = document.getElementById('articleModal');
+        if (!modal) return;
+        modal.classList.remove('show');
+        modal.style.display = 'none';
+        document.body.style.overflow = '';
     }
 
     // Get article preview (first few lines)
@@ -499,6 +532,8 @@ function initializeApp() {
     try {
         app = new RSSAggregator();
         app.init();
+        // Make app globally accessible
+        window.app = app;
     } catch (error) {
         console.error('Failed to initialize RSS Aggregator:', error);
     }
