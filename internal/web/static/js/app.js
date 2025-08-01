@@ -82,6 +82,10 @@ class RSSAggregator {
             
             const data = await response.json();
             this.topics = data.topics || [];
+            
+            // Sort topics alphabetically for consistent order
+            this.topics.sort((a, b) => a.localeCompare(b));
+            
             this.renderTopics();
         } catch (error) {
             this.showError('Failed to load topics: ' + error.message);
@@ -274,7 +278,10 @@ class RSSAggregator {
     // Render articles
     renderArticles() {
         const articlesContainer = document.getElementById('articlesContainer');
-        if (!articlesContainer) return;
+        if (!articlesContainer) {
+            console.error('Articles container not found');
+            return;
+        }
 
         if (this.articles.length === 0) {
             articlesContainer.innerHTML = `
@@ -287,15 +294,29 @@ class RSSAggregator {
         }
 
         const articlesHTML = this.articles.map((article, index) => {
+            // Validate article data
+            if (!article.id) {
+                console.error(`Article at index ${index} missing ID:`, article);
+                return '';
+            }
+            
+            if (!article.title) {
+                console.error(`Article ${article.id} missing title`);
+                return '';
+            }
+
             const preview = this.getArticlePreview(article.content);
+            const hasLink = article.link && article.link.trim() !== '';
+            
             return `
                 <div class="article-card" data-article-id="${article.id}">
                     <div class="article-header">
                         <div class="article-title">${this.escapeHtml(article.title)}</div>
                         <div class="article-meta">
-                            <span class="article-source">${this.escapeHtml(article.source)}</span>
+                            <span class="article-source">${this.escapeHtml(article.source || 'Unknown')}</span>
                             <span class="article-date">${new Date(article.published_at).toLocaleDateString()}</span>
-                            <span class="article-topic">${this.escapeHtml(article.topic)}</span>
+                            <span class="article-topic">${this.escapeHtml(article.topic || 'Unknown')}</span>
+                            ${article.language && article.language !== 'en' ? `<span class="language-badge" title="Language: ${this.getLanguageName(article.language)}">${article.language.toUpperCase()}</span>` : ''}
                         </div>
                     </div>
                     <div class="article-content collapsed">
@@ -305,9 +326,7 @@ class RSSAggregator {
                         <button class="readmore-button" data-article-id="${article.id}" type="button">
                             Read More
                         </button>
-                        <a href="${this.escapeHtml(article.link)}" target="_blank" class="read-more-link">
-                            Read Full Article
-                        </a>
+                        ${hasLink ? `<a href="${this.escapeHtml(article.link)}" target="_blank" class="read-more-link">Read Full Article</a>` : '<span class="no-link">No link available</span>'}
                     </div>
                 </div>
             `;
@@ -320,24 +339,33 @@ class RSSAggregator {
     // Bind events specifically for articles and modal
     bindArticleEvents() {
         const articlesContainer = document.getElementById('articlesContainer');
-        if (!articlesContainer) return;
+        if (!articlesContainer) {
+            console.error('Articles container not found for event binding');
+            return;
+        }
 
         // Remove any existing event listeners
         const readMoreButtons = articlesContainer.querySelectorAll('.readmore-button');
-        readMoreButtons.forEach(button => {
+        
+        readMoreButtons.forEach((button, index) => {
             const newButton = button.cloneNode(true);
             button.parentNode.replaceChild(newButton, button);
         });
 
         // Add new event listeners
         const newReadMoreButtons = articlesContainer.querySelectorAll('.readmore-button');
-        newReadMoreButtons.forEach(button => {
+        
+        newReadMoreButtons.forEach((button, index) => {
+            const articleId = button.getAttribute('data-article-id');
+            
             button.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                const articleId = button.getAttribute('data-article-id');
+                
                 if (articleId) {
                     this.showArticleModal(articleId);
+                } else {
+                    console.error('No article ID found for clicked button');
                 }
             });
         });
@@ -521,7 +549,29 @@ class RSSAggregator {
 
     formatDate(dateString) {
         const date = new Date(dateString);
-        return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+        return date.toLocaleDateString();
+    }
+
+    getLanguageName(languageCode) {
+        const languageNames = {
+            'en': 'English',
+            'de': 'German',
+            'fr': 'French',
+            'es': 'Spanish',
+            'zh': 'Chinese',
+            'ru': 'Russian',
+            'it': 'Italian',
+            'pt': 'Portuguese',
+            'nl': 'Dutch',
+            'sv': 'Swedish',
+            'da': 'Danish',
+            'fi': 'Finnish',
+            'pl': 'Polish',
+            'cs': 'Czech',
+            'hu': 'Hungarian',
+            'ro': 'Romanian'
+        };
+        return languageNames[languageCode] || languageCode.toUpperCase();
     }
 }
 

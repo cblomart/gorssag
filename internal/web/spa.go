@@ -3,6 +3,8 @@ package web
 import (
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,8 +36,17 @@ func (s *SPAServer) RegisterRoutes(router *gin.Engine) {
 	router.GET("/", s.serveSPA)
 	router.GET("/config", s.serveConfig) // New configuration page
 
-	// Serve static assets from filesystem
-	router.Static("/static", "./internal/web/static")
+	// Get the current working directory
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Printf("Warning: could not get working directory: %v", err)
+		wd = "."
+	}
+
+	// Serve static assets from filesystem with absolute path
+	staticPath := filepath.Join(wd, "internal", "web", "static")
+	log.Printf("Serving static files from: %s", staticPath)
+	router.Static("/static", staticPath)
 
 	log.Println("SPA routes registered successfully")
 }

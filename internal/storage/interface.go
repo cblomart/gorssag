@@ -1,6 +1,9 @@
 package storage
 
-import "gorssag/internal/models"
+import (
+	"gorssag/internal/models"
+	"time"
+)
 
 // Storage defines the interface for different storage backends
 type Storage interface {
@@ -11,4 +14,12 @@ type Storage interface {
 	GetFeedInfo(topic string) (*models.FeedInfo, error)
 	DeleteFeed(topic string) error
 	Close() error
+
+	// Storage optimization methods
+	CleanupOldArticles(retention time.Duration) error
+	OptimizeDatabase() error
+	GetDatabaseStats() (map[string]interface{}, error)
+	RemoveDuplicateArticles() error
+	CompressOldArticles() error
+	GetFeedStats() (map[string]interface{}, error) // New method for feed statistics
 }

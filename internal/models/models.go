@@ -16,6 +16,7 @@ type Article struct {
 	Source      string    `json:"source"`
 	Categories  []string  `json:"categories"`
 	Topic       string    `json:"topic,omitempty"` // Topic this article belongs to
+	Language    string    `json:"language"`        // New field for article language
 }
 
 // AggregatedFeed represents an aggregated RSS feed for a topic

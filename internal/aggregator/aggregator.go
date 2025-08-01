@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,17 +16,13 @@ import (
 	"gorssag/internal/odata"
 	"gorssag/internal/storage"
 
+	"github.com/google/uuid"
 	"github.com/mmcdole/gofeed"
 )
 
-// Common User-Agents to test
+// Common User-Agents to test - reduced for efficiency
 var userAgentsToTest = []string{
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0",
 	"", // Default/empty User-Agent
 }
 
@@ -37,6 +35,21 @@ type Aggregator struct {
 	mu           sync.RWMutex
 	parser       *gofeed.Parser
 	filterParser *odata.FilterParser
+
+	// New fields for centralized feed management
+	allArticles  map[string]models.Article // Map of article ID to article (all articles from all feeds)
+	feedArticles map[string][]string       // Map of feed URL to list of article IDs
+	lastFeedPoll map[string]time.Time      // Track when each feed was last polled
+
+	// HTTP caching fields
+	feedCache map[string]*FeedCacheEntry // Cache ETags and Last-Modified for each feed
+}
+
+// FeedCacheEntry stores HTTP caching information for a feed
+type FeedCacheEntry struct {
+	ETag         string    `json:"etag"`
+	LastModified string    `json:"last_modified"`
+	LastChecked  time.Time `json:"last_checked"`
 }
 
 func New(cacheManager *cache.Manager, storage storage.Storage, feeds map[string]config.TopicConfig) *Aggregator {
@@ -47,6 +60,10 @@ func New(cacheManager *cache.Manager, storage storage.Storage, feeds map[string]
 		parser:       gofeed.NewParser(),
 		filterParser: odata.NewFilterParser(),
 		feedStatus:   make(map[string]*models.FeedStatus),
+		allArticles:  make(map[string]models.Article),
+		feedArticles: make(map[string][]string),
+		lastFeedPoll: make(map[string]time.Time),
+		feedCache:    make(map[string]*FeedCacheEntry),
 	}
 }
 
@@ -55,12 +72,404 @@ func (a *Aggregator) GetAvailableTopics() []string {
 	for topic := range a.feeds {
 		topics = append(topics, topic)
 	}
+
+	// Sort topics alphabetically for consistent order
+	sort.Strings(topics)
+
 	return topics
 }
 
 // GetConfig returns the current feed configuration
 func (a *Aggregator) GetConfig() map[string]config.TopicConfig {
 	return a.feeds
+}
+
+// GetAllUniqueFeedURLs returns all unique RSS feed URLs across all topics
+func (a *Aggregator) GetAllUniqueFeedURLs() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	urlSet := make(map[string]bool)
+	for _, topicConfig := range a.feeds {
+		for _, url := range topicConfig.URLs {
+			urlSet[url] = true
+		}
+	}
+
+	var urls []string
+	for url := range urlSet {
+		urls = append(urls, url)
+	}
+
+	// Sort URLs alphabetically for consistent order
+	sort.Strings(urls)
+
+	return urls
+}
+
+// GetTopicsForFeed returns all topics that use a specific feed URL
+func (a *Aggregator) GetTopicsForFeed(feedURL string) []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var topics []string
+	for topic, topicConfig := range a.feeds {
+		for _, url := range topicConfig.URLs {
+			if url == feedURL {
+				topics = append(topics, topic)
+				break
+			}
+		}
+	}
+
+	// Sort topics alphabetically for consistent order
+	sort.Strings(topics)
+
+	return topics
+}
+
+// PollFeed polls a single feed and stores articles centrally
+func (a *Aggregator) PollFeed(feedURL string) error {
+	// Use RLock for reading operations
+	a.mu.RLock()
+
+	// Check if we should retry this feed
+	if !a.ShouldRetryFeed(feedURL) {
+		status, exists := a.feedStatus[feedURL]
+		if exists && status.IsDisabled {
+			a.mu.RUnlock()
+			return fmt.Errorf("feed is disabled: %s", status.DisabledReason)
+		}
+	}
+
+	// Get stored User-Agent for this feed
+	status, exists := a.feedStatus[feedURL]
+	var userAgent string
+	if exists && status.UserAgent != "" {
+		userAgent = status.UserAgent
+	}
+
+	a.mu.RUnlock() // Release RLock before calling other methods
+
+	// Try to fetch with stored User-Agent first
+	var feed *gofeed.Feed
+	var err error
+
+	if userAgent != "" {
+		feed, err = a.testFeedWithUserAgent(feedURL, userAgent)
+		if err != nil {
+			log.Printf("Failed to fetch %s with stored User-Agent: %v", feedURL, err)
+		}
+	}
+
+	// If no stored User-Agent or it failed, try to find a working one
+	if feed == nil || err != nil {
+		log.Printf("Testing User-Agents for %s", feedURL)
+		workingUserAgent, uaErr := a.TestUserAgentForFeed(feedURL)
+		if uaErr != nil {
+			// Update status with error
+			a.UpdateFeedStatus(feedURL, "", 0, uaErr)
+			return fmt.Errorf("failed to find working User-Agent for %s: %v", feedURL, uaErr)
+		}
+
+		// Set the working User-Agent
+		a.SetUserAgentForFeed(feedURL, workingUserAgent)
+		userAgent = workingUserAgent
+
+		// Fetch with the working User-Agent
+		feed, err = a.testFeedWithUserAgent(feedURL, userAgent)
+		if err != nil {
+			// Check if this is a "not modified" error (which is not really an error)
+			if strings.Contains(err.Error(), "feed not modified") {
+				log.Printf("Feed %s not modified - skipping processing", feedURL)
+				a.UpdateFeedStatus(feedURL, "", 0, nil) // Update as successful
+				return nil
+			}
+			a.UpdateFeedStatus(feedURL, "", 0, err)
+			return fmt.Errorf("failed to parse feed: %v", err)
+		}
+	}
+
+	// Process articles from the feed
+	var newArticles []models.Article
+	for _, item := range feed.Items {
+		// Skip items without required fields
+		if item.Title == "" {
+			continue
+		}
+
+		// Convert content
+		content := ""
+		if item.Content != "" {
+			content = convertHTMLToMarkdown(item.Content)
+		}
+
+		// Fallback to description if content is empty
+		if content == "" && item.Description != "" {
+			content = item.Description
+		}
+
+		// Skip if still no content
+		if content == "" {
+			log.Printf("WARNING: Feed '%s' has item '%s' with no content and no description - skipping", feed.Title, item.Title)
+			continue
+		}
+
+		// Generate consistent article ID
+		articleID := generateArticleID(item.Title, item.Link, item.PublishedParsed)
+
+		// Create article
+		article := models.Article{
+			ID:          articleID,
+			Title:       item.Title,
+			Link:        item.Link,
+			Description: item.Description,
+			Content:     content,
+			Author:      getAuthorName(item),
+			PublishedAt: getPublishedTime(item),
+			Source:      feed.Title,
+			Categories:  item.Categories,
+		}
+
+		// Store article centrally (will overwrite if already exists, ensuring consistent ID)
+		a.allArticles[articleID] = article
+		newArticles = append(newArticles, article)
+	}
+
+	// Update feed articles mapping
+	var articleIDs []string
+	for _, article := range newArticles {
+		articleIDs = append(articleIDs, article.ID)
+	}
+	a.feedArticles[feedURL] = articleIDs
+
+	// Update feed status
+	a.UpdateFeedStatus(feedURL, "", len(newArticles), nil)
+	a.lastFeedPoll[feedURL] = time.Now()
+
+	// Save to storage for each topic that uses this feed
+	topics := a.GetTopicsForFeed(feedURL)
+	for _, topic := range topics {
+		// Apply topic-specific filters
+		topicConfig := a.feeds[topic]
+		filteredArticles := a.filterArticlesForTopic(newArticles, topicConfig.Filters)
+
+		if len(filteredArticles) > 0 {
+			// Create aggregated feed for storage
+			aggregatedFeed := &models.AggregatedFeed{
+				Topic:    topic,
+				Articles: filteredArticles,
+				Count:    len(filteredArticles),
+				Updated:  time.Now(),
+			}
+
+			err := a.storage.SaveFeed(topic, aggregatedFeed)
+			if err != nil {
+				log.Printf("Error saving articles for topic %s: %v", topic, err)
+			}
+		}
+	}
+
+	log.Printf("Polled feed %s: %d articles, %d topics affected", feedURL, len(newArticles), len(topics))
+	return nil
+}
+
+// PollAllFeeds polls all unique feeds with improved parallelism
+func (a *Aggregator) PollAllFeeds() error {
+	urls := a.GetAllUniqueFeedURLs()
+	log.Printf("DEBUG: PollAllFeeds called with %d unique feeds: %v", len(urls), urls)
+
+	// Use a worker pool pattern for better resource management
+	const maxWorkers = 10
+	const timeout = 60 * time.Second // Increased timeout to 60 seconds
+
+	log.Printf("DEBUG: Starting worker pool with %d workers", maxWorkers)
+
+	// Create channels for coordination
+	urlChan := make(chan string, len(urls))
+	resultChan := make(chan error, len(urls))
+
+	// Start worker goroutines
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			log.Printf("DEBUG: Worker %d started", workerID)
+			for url := range urlChan {
+				log.Printf("DEBUG: Worker %d processing URL: %s", workerID, url)
+				err := a.PollFeed(url)
+				log.Printf("DEBUG: Worker %d completed URL %s with error: %v", workerID, url, err)
+				resultChan <- err
+			}
+			log.Printf("DEBUG: Worker %d finished", workerID)
+		}(i)
+	}
+
+	// Send URLs to workers
+	go func() {
+		for _, url := range urls {
+			urlChan <- url
+		}
+		close(urlChan)
+	}()
+
+	// Wait for all workers to complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results with improved timeout handling
+	timeoutChan := time.After(timeout)
+	var errors []error
+	var successCount int
+
+	for {
+		select {
+		case err, ok := <-resultChan:
+			if !ok {
+				// All workers completed
+				log.Printf("Feed polling completed: %d successful, %d errors", successCount, len(errors))
+				if len(errors) > 0 {
+					return fmt.Errorf("some feeds failed to poll (%d/%d): %v", len(errors), len(urls), errors)
+				}
+				return nil
+			}
+			if err != nil {
+				errors = append(errors, err)
+				log.Printf("Feed polling error: %v", err)
+			} else {
+				successCount++
+			}
+		case <-timeoutChan:
+			log.Printf("Timeout after %v - %d feeds completed, %d pending", timeout, successCount+len(errors), len(urls)-successCount-len(errors))
+			return fmt.Errorf("timeout polling feeds after %v", timeout)
+		}
+	}
+}
+
+// Helper functions moved from poller
+func convertHTMLToMarkdown(html string) string {
+	if html == "" {
+		return ""
+	}
+
+	// Remove CDATA sections
+	html = regexp.MustCompile(`<!\[CDATA\[(.*?)\]\]>`).ReplaceAllString(html, "$1")
+
+	// Convert common HTML entities
+	html = strings.ReplaceAll(html, "&mdash;", "—")
+	html = strings.ReplaceAll(html, "&ndash;", "–")
+	html = strings.ReplaceAll(html, "&ldquo;", "\"")
+	html = strings.ReplaceAll(html, "&rdquo;", "\"")
+	html = strings.ReplaceAll(html, "&lsquo;", "'")
+	html = strings.ReplaceAll(html, "&rsquo;", "'")
+	html = strings.ReplaceAll(html, "&amp;", "&")
+	html = strings.ReplaceAll(html, "&lt;", "<")
+	html = strings.ReplaceAll(html, "&gt;", ">")
+	html = strings.ReplaceAll(html, "&quot;", "\"")
+	html = strings.ReplaceAll(html, "&#39;", "'")
+	html = strings.ReplaceAll(html, "&nbsp;", " ")
+
+	// Convert images to markdown (remove URLs, keep meaningful alt text)
+	html = regexp.MustCompile(`<img[^>]*alt=["']([^"']{1,50})["'][^>]*>`).ReplaceAllStringFunc(html, func(match string) string {
+		altMatch := regexp.MustCompile(`alt=["']([^"']{1,50})["']`).FindStringSubmatch(match)
+		if len(altMatch) > 1 {
+			altText := strings.ToLower(altMatch[1])
+			// Only keep meaningful alt text
+			meaningfulTerms := []string{"chart", "graph", "diagram", "screenshot", "photo", "image", "picture", "logo", "icon"}
+			for _, term := range meaningfulTerms {
+				if strings.Contains(altText, term) {
+					return ""
+				}
+			}
+			return altMatch[1]
+		}
+		return ""
+	})
+
+	// Remove other image tags
+	html = regexp.MustCompile(`<img[^>]*>`).ReplaceAllString(html, "")
+
+	// Convert links to markdown
+	html = regexp.MustCompile(`<a[^>]*href=["']([^"']*)["'][^>]*>([^<]*)</a>`).ReplaceAllStringFunc(html, func(match string) string {
+		hrefMatch := regexp.MustCompile(`href=["']([^"']*)["']`).FindStringSubmatch(match)
+		textMatch := regexp.MustCompile(`>([^<]*)</a>`).FindStringSubmatch(match)
+
+		if len(hrefMatch) > 1 && len(textMatch) > 1 {
+			href := hrefMatch[1]
+			text := textMatch[1]
+
+			// Skip if text is empty or just whitespace
+			if strings.TrimSpace(text) == "" {
+				return ""
+			}
+
+			// Extract domain for readability if text is a URL
+			if strings.HasPrefix(text, "http") {
+				parts := strings.Split(text, "/")
+				if len(parts) > 2 {
+					text = parts[2] // domain
+				}
+			}
+
+			return fmt.Sprintf("[%s](%s)", text, href)
+		}
+		return ""
+	})
+
+	// Convert basic HTML tags
+	html = regexp.MustCompile(`<h[1-6][^>]*>([^<]*)</h[1-6]>`).ReplaceAllString(html, "## $1\n\n")
+	html = regexp.MustCompile(`<strong[^>]*>([^<]*)</strong>`).ReplaceAllString(html, "**$1**")
+	html = regexp.MustCompile(`<b[^>]*>([^<]*)</b>`).ReplaceAllString(html, "**$1**")
+	html = regexp.MustCompile(`<em[^>]*>([^<]*)</em>`).ReplaceAllString(html, "*$1*")
+	html = regexp.MustCompile(`<i[^>]*>([^<]*)</i>`).ReplaceAllString(html, "*$1*")
+	html = regexp.MustCompile(`<code[^>]*>([^<]*)</code>`).ReplaceAllString(html, "`$1`")
+	html = regexp.MustCompile(`<pre[^>]*>([^<]*)</pre>`).ReplaceAllString(html, "```\n$1\n```")
+
+	// Convert paragraphs
+	html = regexp.MustCompile(`<p[^>]*>([^<]*)</p>`).ReplaceAllString(html, "$1\n\n")
+
+	// Convert line breaks
+	html = regexp.MustCompile(`<br[^>]*>`).ReplaceAllString(html, "\n")
+
+	// Remove remaining HTML tags
+	html = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(html, "")
+
+	// Clean up whitespace
+	html = regexp.MustCompile(`\n\s*\n`).ReplaceAllString(html, "\n\n")
+	html = strings.TrimSpace(html)
+
+	// Remove empty markdown links
+	html = regexp.MustCompile(`\[\]\([^)]*\)`).ReplaceAllString(html, "")
+
+	// Fix double brackets in links
+	html = regexp.MustCompile(`\[\[([^\]]*)\]\]\(([^)]*)\)`).ReplaceAllString(html, "[$1]($2)")
+
+	return html
+}
+
+func generateArticleID(title, link string, publishedAt *time.Time) string {
+	// Generate a proper UUID for the article
+	return uuid.New().String()
+}
+
+func getAuthorName(item *gofeed.Item) string {
+	if item.Author != nil && item.Author.Name != "" {
+		return item.Author.Name
+	}
+	return "Unknown"
+}
+
+func getPublishedTime(item *gofeed.Item) time.Time {
+	if item.PublishedParsed != nil {
+		return *item.PublishedParsed
+	}
+	if item.UpdatedParsed != nil {
+		return *item.UpdatedParsed
+	}
+	return time.Now()
 }
 
 // GetFeedStatus returns the status of all feeds
@@ -125,9 +534,14 @@ func (a *Aggregator) TestUserAgentForFeed(url string) (string, error) {
 
 // testFeedWithUserAgent tests a feed with a specific User-Agent
 func (a *Aggregator) testFeedWithUserAgent(url, userAgent string) (*gofeed.Feed, error) {
+	// Get cached headers for this feed
+	a.mu.RLock()
+	cacheEntry, hasCache := a.feedCache[url]
+	a.mu.RUnlock()
+
 	// Create a custom HTTP client with the User-Agent
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 5 * time.Second, // Reduced timeout for faster testing
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -139,15 +553,45 @@ func (a *Aggregator) testFeedWithUserAgent(url, userAgent string) (*gofeed.Feed,
 		req.Header.Set("User-Agent", userAgent)
 	}
 
+	// Add caching headers if we have cached data
+	if hasCache && cacheEntry.ETag != "" {
+		req.Header.Set("If-None-Match", cacheEntry.ETag)
+	}
+	if hasCache && cacheEntry.LastModified != "" {
+		req.Header.Set("If-Modified-Since", cacheEntry.LastModified)
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	// Handle 304 Not Modified - feed hasn't changed
+	if resp.StatusCode == http.StatusNotModified {
+		log.Printf("Feed %s not modified since last check (304)", url)
+		return nil, fmt.Errorf("feed not modified")
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+
+	// Store caching headers for next request
+	a.mu.Lock()
+	if a.feedCache[url] == nil {
+		a.feedCache[url] = &FeedCacheEntry{}
+	}
+
+	// Update cache with new headers
+	if etag := resp.Header.Get("ETag"); etag != "" {
+		a.feedCache[url].ETag = etag
+	}
+	if lastModified := resp.Header.Get("Last-Modified"); lastModified != "" {
+		a.feedCache[url].LastModified = lastModified
+	}
+	a.feedCache[url].LastChecked = time.Now()
+	a.mu.Unlock()
 
 	// Parse the feed
 	parser := gofeed.NewParser()
@@ -156,6 +600,7 @@ func (a *Aggregator) testFeedWithUserAgent(url, userAgent string) (*gofeed.Feed,
 		return nil, err
 	}
 
+	log.Printf("Successfully fetched feed %s with %d items", url, len(feed.Items))
 	return feed, nil
 }
 
@@ -293,59 +738,51 @@ func (a *Aggregator) ShouldRetryFeed(url string) bool {
 }
 
 func (a *Aggregator) GetAggregatedFeed(topic string, query *models.ODataQuery) (*models.AggregatedFeed, error) {
+	log.Printf("DEBUG: GetAggregatedFeed called for topic '%s'", topic)
+
 	// Check if topic exists
-	topicConfig, exists := a.feeds[topic]
+	_, exists := a.feeds[topic]
 	if !exists {
+		log.Printf("DEBUG: Topic '%s' not found in feeds config", topic)
 		return nil, fmt.Errorf("topic '%s' not found", topic)
 	}
+	log.Printf("DEBUG: Topic '%s' exists in feeds config", topic)
 
 	// Try to get from cache first
 	cacheKey := fmt.Sprintf("feed:%s", topic)
 	if cached, found := a.cacheManager.Get(cacheKey); found {
+		log.Printf("DEBUG: Found cached feed for topic '%s'", topic)
 		if feed, ok := cached.(*models.AggregatedFeed); ok {
 			// Apply OData query to cached data
 			return a.applyODataQuery(feed, query)
 		}
 	}
+	log.Printf("DEBUG: No cached feed found for topic '%s', trying storage", topic)
 
 	// Try to load from storage
+	log.Printf("DEBUG: About to call storage.LoadFeed for topic '%s'", topic)
 	if feed, err := a.storage.LoadFeed(topic); err == nil {
+		log.Printf("DEBUG: Successfully loaded feed from storage for topic '%s'", topic)
 		// Cache the loaded feed
 		a.cacheManager.Set(cacheKey, feed, 0)
 		// Apply OData query
 		return a.applyODataQuery(feed, query)
+	} else {
+		log.Printf("DEBUG: Failed to load feed from storage for topic '%s': %v", topic, err)
 	}
 
-	// Fetch from RSS feeds
-	articles, err := a.fetchFeedsParallel(topicConfig.URLs, topic)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch feeds for topic '%s': %v", topic, err)
-	}
-
-	// Filter articles based on topic configuration
-	filteredArticles := a.filterArticlesForTopic(articles, topicConfig.Filters)
-
-	if len(filteredArticles) == 0 {
-		return nil, fmt.Errorf("no articles found for topic '%s' after filtering", topic)
-	}
-
-	feed := &models.AggregatedFeed{
+	// If no data in storage, return empty result instead of trying to fetch
+	// This prevents hanging when there are no articles yet
+	log.Printf("DEBUG: Returning empty feed for topic '%s'", topic)
+	emptyFeed := &models.AggregatedFeed{
 		Topic:    topic,
-		Articles: filteredArticles,
-		Count:    len(filteredArticles),
+		Articles: []models.Article{},
+		Count:    0,
 		Updated:  time.Now(),
 	}
 
-	// Save to storage
-	if err := a.storage.SaveFeed(topic, feed); err != nil {
-		log.Printf("Warning: failed to save feed for topic '%s': %v", topic, err)
-	}
-
-	// Cache the feed
-	a.cacheManager.Set(cacheKey, feed, 0)
-
-	// Apply OData query
-	return a.applyODataQuery(feed, query)
+	// Apply OData query to empty feed
+	return a.applyODataQuery(emptyFeed, query)
 }
 
 func (a *Aggregator) filterArticlesForTopic(articles []models.Article, filters []string) []models.Article {
@@ -377,7 +814,17 @@ func (a *Aggregator) articleMatchesFilters(article models.Article, filters []str
 
 	// Check if any filter term matches (OR logic)
 	for _, filter := range filters {
-		if strings.Contains(articleText, strings.ToLower(filter)) {
+		filterLower := strings.ToLower(filter)
+
+		// Use word boundaries for more accurate matching
+		// This prevents "crypto" from matching "cryptography" or "cryptocurrency" from matching "currency"
+		wordBoundaryPattern := `\b` + regexp.QuoteMeta(filterLower) + `\b`
+		if matched, _ := regexp.MatchString(wordBoundaryPattern, articleText); matched {
+			return true
+		}
+
+		// Also check for exact phrases (for multi-word filters like "artificial intelligence")
+		if strings.Contains(articleText, filterLower) {
 			return true
 		}
 	}
@@ -480,6 +927,12 @@ func (a *Aggregator) fetchFeed(url string, topic string) ([]models.Article, erro
 		// Fetch with the working User-Agent
 		feed, err = a.testFeedWithUserAgent(url, userAgent)
 		if err != nil {
+			// Check if this is a "not modified" error (which is not really an error)
+			if strings.Contains(err.Error(), "feed not modified") {
+				log.Printf("Feed %s not modified - skipping processing", url)
+				a.UpdateFeedStatus(url, topic, 0, nil) // Update as successful
+				return []models.Article{}, nil         // Return empty articles slice
+			}
 			a.UpdateFeedStatus(url, topic, 0, err)
 			return nil, fmt.Errorf("failed to parse feed: %v", err)
 		}
@@ -809,6 +1262,16 @@ func (a *Aggregator) GetFeedHealth() map[string][]FeedHealth {
 	}
 
 	return health
+}
+
+// GetStorageStats returns database statistics
+func (a *Aggregator) GetStorageStats() (map[string]interface{}, error) {
+	return a.storage.GetDatabaseStats()
+}
+
+// GetFeedStats returns detailed feed statistics
+func (a *Aggregator) GetFeedStats() (map[string]interface{}, error) {
+	return a.storage.GetFeedStats()
 }
 
 // getSpecificErrorReason provides detailed error explanations

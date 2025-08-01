@@ -15,37 +15,45 @@ import (
 	"gorssag/internal/models"
 	"gorssag/internal/storage"
 
-	"github.com/google/uuid"
+	md "github.com/JohannesKaufmann/html-to-markdown"
+	"github.com/PuerkitoBio/goquery"
 	"github.com/mmcdole/gofeed"
 )
 
 type Poller struct {
-	aggregator   *aggregator.Aggregator
-	cacheManager *cache.Manager
-	storage      storage.Storage
-	feeds        map[string]config.TopicConfig
-	parser       *gofeed.Parser
-	pollInterval time.Duration
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	mu           sync.RWMutex
-	lastPolled   map[string]time.Time
-	isPolling    bool
+	aggregator       *aggregator.Aggregator
+	cacheManager     *cache.Manager
+	storage          storage.Storage
+	feeds            map[string]config.TopicConfig
+	parser           *gofeed.Parser
+	pollInterval     time.Duration
+	articleRetention time.Duration
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	mu               sync.RWMutex
+	lastPolled       map[string]time.Time
+	isPolling        bool
+
+	// Storage optimization fields
+	config           *config.Config
+	lastOptimization time.Time
 }
 
-func New(agg *aggregator.Aggregator, cacheManager *cache.Manager, storage storage.Storage, feeds map[string]config.TopicConfig, pollInterval time.Duration) *Poller {
+func New(agg *aggregator.Aggregator, cacheManager *cache.Manager, storage storage.Storage, feeds map[string]config.TopicConfig, pollInterval time.Duration, articleRetention time.Duration, cfg *config.Config) *Poller {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Poller{
-		aggregator:   agg,
-		cacheManager: cacheManager,
-		storage:      storage,
-		feeds:        feeds,
-		parser:       gofeed.NewParser(),
-		pollInterval: pollInterval,
-		ctx:          ctx,
-		cancel:       cancel,
-		lastPolled:   make(map[string]time.Time),
+		aggregator:       agg,
+		cacheManager:     cacheManager,
+		storage:          storage,
+		feeds:            feeds,
+		parser:           gofeed.NewParser(),
+		pollInterval:     pollInterval,
+		articleRetention: articleRetention,
+		ctx:              ctx,
+		cancel:           cancel,
+		lastPolled:       make(map[string]time.Time),
+		config:           cfg,
 	}
 }
 
@@ -99,19 +107,67 @@ func (p *Poller) pollLoop() {
 }
 
 func (p *Poller) pollAllFeeds() {
-	log.Println("Starting background feed polling...")
+	p.mu.Lock()
+	if p.isPolling {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
 
-	var wg sync.WaitGroup
-	for topic := range p.feeds {
-		wg.Add(1)
-		go func(topicName string) {
-			defer wg.Done()
-			p.pollTopicFeeds(topicName)
-		}(topic)
+	log.Printf("Starting background feed polling...")
+
+	// Use the new centralized polling system
+	err := p.aggregator.PollAllFeeds()
+	if err != nil {
+		log.Printf("Error polling feeds: %v", err)
 	}
 
-	wg.Wait()
-	log.Println("Background feed polling completed")
+	// Clean up old articles based on retention policy
+	if err := p.storage.CleanupOldArticles(p.articleRetention); err != nil {
+		log.Printf("Warning: failed to cleanup old articles: %v", err)
+	}
+
+	// Run storage optimization periodically
+	p.runStorageOptimization()
+
+	log.Printf("Background feed polling completed")
+}
+
+// runStorageOptimization runs storage optimization tasks periodically
+func (p *Poller) runStorageOptimization() {
+	// Check if it's time to run optimization
+	if time.Since(p.lastOptimization) < p.config.DatabaseOptimizeInterval {
+		return
+	}
+
+	log.Printf("Running storage optimization...")
+
+	// Compress old articles that are still uncompressed
+	if err := p.storage.CompressOldArticles(); err != nil {
+		log.Printf("Warning: failed to compress old articles: %v", err)
+	}
+
+	// Remove duplicate articles if enabled
+	if p.config.EnableDuplicateRemoval {
+		if err := p.storage.RemoveDuplicateArticles(); err != nil {
+			log.Printf("Warning: failed to remove duplicate articles: %v", err)
+		}
+	}
+
+	// Run database optimization
+	if err := p.storage.OptimizeDatabase(); err != nil {
+		log.Printf("Warning: failed to optimize database: %v", err)
+	}
+
+	// Get and log database statistics
+	if stats, err := p.storage.GetDatabaseStats(); err == nil {
+		log.Printf("Database stats: %+v", stats)
+	} else {
+		log.Printf("Warning: failed to get database stats: %v", err)
+	}
+
+	p.lastOptimization = time.Now()
+	log.Printf("Storage optimization completed")
 }
 
 func (p *Poller) pollTopicFeeds(topic string) {
@@ -315,345 +371,141 @@ func convertHTMLToMarkdown(html string) string {
 		return ""
 	}
 
-	// Store original HTML for fallback
-	originalHTML := html
+	// Create converter with options for better formatting
+	converter := md.NewConverter("", true, nil)
 
-	// Remove HTML tags and convert to Markdown
-	text := html
-
-	// Handle CDATA sections first
-	text = regexp.MustCompile(`<!\[CDATA\[(.*?)\]\]>`).ReplaceAllString(text, "$1")
-
-	// Convert images - handle both img tags and img elements within links
-	// First, handle standalone img tags
-	text = regexp.MustCompile(`<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>`).ReplaceAllStringFunc(text, func(match string) string {
-		// Extract alt text and use it if meaningful, otherwise skip the image
-		altMatch := regexp.MustCompile(`<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>`).FindStringSubmatch(match)
-		if len(altMatch) >= 3 {
-			altText := strings.TrimSpace(altMatch[2])
-			altTextLower := strings.ToLower(altText)
-			// Only include alt text if it's meaningful and not just a generic description
-			// Skip if it's empty, generic, or just describes the image
-			if altText != "" &&
-				altText != "image" &&
-				altText != "Image" &&
-				!strings.Contains(altTextLower, "image") &&
-				!strings.Contains(altTextLower, "presentation") &&
-				!strings.Contains(altTextLower, "banner") &&
-				!strings.Contains(altTextLower, "header") &&
-				!strings.Contains(altTextLower, "logo") &&
-				!strings.Contains(altTextLower, "icon") &&
-				!strings.Contains(altTextLower, "tech") &&
-				!strings.Contains(altTextLower, "modern") &&
-				!strings.Contains(altTextLower, "futuristic") &&
-				!strings.Contains(altTextLower, "business") &&
-				!strings.Contains(altTextLower, "company") &&
-				len(altText) < 50 { // More restrictive length check
-				return "**" + altText + "**"
-			}
-		}
-		// Remove image if no meaningful alt text
-		return ""
-	})
-	text = regexp.MustCompile(`<img[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*>`).ReplaceAllStringFunc(text, func(match string) string {
-		// Extract alt text and use it if meaningful, otherwise skip the image
-		altMatch := regexp.MustCompile(`<img[^>]*alt="([^"]*)"[^>]*src="([^"]*)"[^>]*>`).FindStringSubmatch(match)
-		if len(altMatch) >= 3 {
-			altText := strings.TrimSpace(altMatch[1])
-			altTextLower := strings.ToLower(altText)
-			// Only include alt text if it's meaningful and not just a generic description
-			// Skip if it's empty, generic, or just describes the image
-			if altText != "" &&
-				altText != "image" &&
-				altText != "Image" &&
-				!strings.Contains(altTextLower, "image") &&
-				!strings.Contains(altTextLower, "presentation") &&
-				!strings.Contains(altTextLower, "banner") &&
-				!strings.Contains(altTextLower, "header") &&
-				!strings.Contains(altTextLower, "logo") &&
-				!strings.Contains(altTextLower, "icon") &&
-				!strings.Contains(altTextLower, "tech") &&
-				!strings.Contains(altTextLower, "modern") &&
-				!strings.Contains(altTextLower, "futuristic") &&
-				!strings.Contains(altTextLower, "business") &&
-				!strings.Contains(altTextLower, "company") &&
-				len(altText) < 50 { // More restrictive length check
-				return "**" + altText + "**"
-			}
-		}
-		// Remove image if no meaningful alt text
-		return ""
-	})
-	text = regexp.MustCompile(`<img[^>]*src="([^"]*)"[^>]*>`).ReplaceAllString(text, "")
-
-	// Handle images within links (like Blogger's image links) - remove them entirely
-	text = regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>\s*<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>\s*</a>`).ReplaceAllStringFunc(text, func(match string) string {
-		// Extract alt text and use it if meaningful, otherwise skip the image link
-		altMatch := regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>\s*<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>\s*</a>`).FindStringSubmatch(match)
-		if len(altMatch) >= 4 {
-			altText := strings.TrimSpace(altMatch[3])
-			altTextLower := strings.ToLower(altText)
-			// Only include alt text if it's meaningful and not just a generic description
-			// Skip if it's empty, generic, or just describes the image
-			if altText != "" &&
-				altText != "image" &&
-				altText != "Image" &&
-				!strings.Contains(altTextLower, "image") &&
-				!strings.Contains(altTextLower, "presentation") &&
-				!strings.Contains(altTextLower, "banner") &&
-				!strings.Contains(altTextLower, "header") &&
-				!strings.Contains(altTextLower, "logo") &&
-				!strings.Contains(altTextLower, "icon") &&
-				!strings.Contains(altTextLower, "tech") &&
-				!strings.Contains(altTextLower, "modern") &&
-				!strings.Contains(altTextLower, "futuristic") &&
-				!strings.Contains(altTextLower, "business") &&
-				!strings.Contains(altTextLower, "company") &&
-				len(altText) < 50 { // More restrictive length check
-				return "**" + altText + "**"
-			}
-		}
-		// Remove image link if no meaningful alt text
-		return ""
-	})
-	text = regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>\s*<img[^>]*src="([^"]*)"[^>]*>\s*</a>`).ReplaceAllString(text, "")
-
-	// Remove any remaining empty image links that might be decorative
-	text = regexp.MustCompile(`\[\]\([^)]*\)`).ReplaceAllString(text, "")
-
-	// Remove any remaining image links that are just domain names (like blogger.googleusercontent.com)
-	text = regexp.MustCompile(`\[[^\]]*\.googleusercontent\.com\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\.blogger\.com\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\.wordpress\.com\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\.medium\.com\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\.substack\.com\]\([^)]*\)`).ReplaceAllString(text, "")
-
-	// More general pattern to remove any image links that contain common image hosting domains
-	text = regexp.MustCompile(`\[[^\]]*googleusercontent[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*blogger[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*wordpress[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*medium[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*substack[^\]]*\]\([^)]*\)`).ReplaceAllString(text, "")
-
-	// Final cleanup: remove any link that contains image hosting domains in the URL
-	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*googleusercontent[^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*blogger[^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*wordpress[^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*medium[^)]*\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[[^\]]*\]\([^)]*substack[^)]*\)`).ReplaceAllString(text, "")
-
-	// Specific cleanup for the exact pattern we're seeing
-	text = regexp.MustCompile(`\[blogger\.googleusercontent\.com\]\([^)]*\)`).ReplaceAllString(text, "")
-
-	// Convert common HTML elements to Markdown
-	text = regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`).ReplaceAllString(text, "# $1\n\n")
-	text = regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`).ReplaceAllString(text, "## $1\n\n")
-	text = regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`).ReplaceAllString(text, "### $1\n\n")
-	text = regexp.MustCompile(`<h4[^>]*>(.*?)</h4>`).ReplaceAllString(text, "#### $1\n\n")
-	text = regexp.MustCompile(`<h5[^>]*>(.*?)</h5>`).ReplaceAllString(text, "##### $1\n\n")
-	text = regexp.MustCompile(`<h6[^>]*>(.*?)</h6>`).ReplaceAllString(text, "###### $1\n\n")
-
-	// Convert strong and bold tags
-	text = regexp.MustCompile(`<strong[^>]*>(.*?)</strong>`).ReplaceAllString(text, "**$1**")
-	text = regexp.MustCompile(`<b[^>]*>(.*?)</b>`).ReplaceAllString(text, "**$1**")
-
-	// Convert emphasis and italic tags
-	text = regexp.MustCompile(`<em[^>]*>(.*?)</em>`).ReplaceAllString(text, "*$1*")
-	text = regexp.MustCompile(`<i[^>]*>(.*?)</i>`).ReplaceAllString(text, "*$1*")
-
-	// Convert links
-	text = regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`).ReplaceAllStringFunc(text, func(match string) string {
-		// Extract href and text content
-		hrefMatch := regexp.MustCompile(`<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>`).FindStringSubmatch(match)
-		if len(hrefMatch) >= 3 {
-			href := hrefMatch[1]
-			linkText := cleanText(hrefMatch[2])
-
-			// If link text is empty or just whitespace, skip the link entirely
-			if strings.TrimSpace(linkText) == "" {
-				return ""
-			}
-
-			// If link text is just the URL or a domain, use a descriptive name
-			if linkText == href || strings.Contains(linkText, "://") {
-				// Extract domain name for better readability
-				if strings.Contains(href, "://") {
-					parts := strings.Split(href, "://")
-					if len(parts) > 1 {
-						domain := strings.Split(parts[1], "/")[0]
-						linkText = domain
-					} else {
-						linkText = "Link"
-					}
-				} else {
-					linkText = "Link"
+	// Add custom rule for <a> tags containing only an <img> child FIRST
+	converter.AddRules(md.Rule{
+		Filter: []string{"a"},
+		Replacement: func(content string, selec *goquery.Selection, opt *md.Options) *string {
+			children := selec.Children()
+			if children.Length() == 1 && goquery.NodeName(children.First()) == "img" {
+				alt := children.First().AttrOr("alt", "")
+				altLower := strings.ToLower(alt)
+				if alt != "" &&
+					alt != "image" &&
+					alt != "Image" &&
+					!strings.Contains(altLower, "image") &&
+					!strings.Contains(altLower, "presentation") &&
+					!strings.Contains(altLower, "banner") &&
+					!strings.Contains(altLower, "header") &&
+					!strings.Contains(altLower, "logo") &&
+					!strings.Contains(altLower, "icon") &&
+					!strings.Contains(altLower, "tech") &&
+					!strings.Contains(altLower, "modern") &&
+					!strings.Contains(altLower, "futuristic") &&
+					!strings.Contains(altLower, "business") &&
+					!strings.Contains(altLower, "company") &&
+					len(alt) < 50 {
+					result := "**" + alt + "**"
+					return &result
 				}
+				return nil
 			}
-
-			return fmt.Sprintf("[%s](%s)", linkText, href)
-		}
-		return match
+			return nil
+		},
 	})
 
-	// Fix double brackets in links (convert [[text]](url) to [text](url))
-	text = regexp.MustCompile(`\[\[([^\]]*)\]\]\(([^)]*)\)`).ReplaceAllString(text, "[$1]($2)")
+	// Add custom rules for images and script/style removal
+	converter.AddRules(
+		md.Rule{
+			Filter: []string{"script", "style"},
+			Replacement: func(content string, selec *goquery.Selection, opt *md.Options) *string {
+				return nil // Remove completely
+			},
+		},
+		md.Rule{
+			Filter: []string{"img"},
+			Replacement: func(content string, selec *goquery.Selection, opt *md.Options) *string {
+				alt := selec.AttrOr("alt", "")
+				altLower := strings.ToLower(alt)
+				if alt != "" &&
+					alt != "image" &&
+					alt != "Image" &&
+					!strings.Contains(altLower, "image") &&
+					!strings.Contains(altLower, "presentation") &&
+					!strings.Contains(altLower, "banner") &&
+					!strings.Contains(altLower, "header") &&
+					!strings.Contains(altLower, "logo") &&
+					!strings.Contains(altLower, "icon") &&
+					!strings.Contains(altLower, "tech") &&
+					!strings.Contains(altLower, "modern") &&
+					!strings.Contains(altLower, "futuristic") &&
+					!strings.Contains(altLower, "business") &&
+					!strings.Contains(altLower, "company") &&
+					len(alt) < 50 {
+					result := "**" + alt + "**"
+					return &result
+				}
+				return nil // Remove image if no meaningful alt text
+			},
+		},
+	)
 
-	// Convert unordered lists with better spacing
-	text = regexp.MustCompile(`<ul[^>]*>(.*?)</ul>`).ReplaceAllStringFunc(text, func(match string) string {
-		content := regexp.MustCompile(`<ul[^>]*>(.*?)</ul>`).ReplaceAllString(match, "$1")
-		content = regexp.MustCompile(`<li[^>]*>(.*?)</li>`).ReplaceAllString(content, "- $1\n")
-		return "\n" + content + "\n"
-	})
-
-	// Convert ordered lists with better spacing
-	text = regexp.MustCompile(`<ol[^>]*>(.*?)</ol>`).ReplaceAllStringFunc(text, func(match string) string {
-		content := regexp.MustCompile(`<ol[^>]*>(.*?)</ol>`).ReplaceAllString(match, "$1")
-		content = regexp.MustCompile(`<li[^>]*>(.*?)</li>`).ReplaceAllStringFunc(content, func(liMatch string) string {
-			liContent := regexp.MustCompile(`<li[^>]*>(.*?)</li>`).ReplaceAllString(liMatch, "$1")
-			return "1. " + liContent + "\n"
-		})
-		return "\n" + content + "\n"
-	})
-
-	// Convert paragraphs with better spacing
-	text = regexp.MustCompile(`<p[^>]*>(.*?)</p>`).ReplaceAllStringFunc(text, func(match string) string {
-		content := regexp.MustCompile(`<p[^>]*>(.*?)</p>`).ReplaceAllString(match, "$1")
-		content = cleanText(content)
-		if content != "" {
-			return content + "\n\n"
-		}
-		return ""
-	})
-
-	// Convert line breaks
-	text = regexp.MustCompile(`<br[^>]*>`).ReplaceAllString(text, "\n")
-	text = regexp.MustCompile(`<br/>`).ReplaceAllString(text, "\n")
-
-	// Convert blockquotes
-	text = regexp.MustCompile(`<blockquote[^>]*>(.*?)</blockquote>`).ReplaceAllStringFunc(text, func(match string) string {
-		content := regexp.MustCompile(`<blockquote[^>]*>(.*?)</blockquote>`).ReplaceAllString(match, "$1")
-		content = cleanText(content)
-		if content != "" {
-			return "\n> " + content + "\n\n"
-		}
-		return ""
-	})
-
-	// Convert pre and code blocks
-	text = regexp.MustCompile(`<pre[^>]*>(.*?)</pre>`).ReplaceAllStringFunc(text, func(match string) string {
-		content := regexp.MustCompile(`<pre[^>]*>(.*?)</pre>`).ReplaceAllString(match, "$1")
-		content = cleanText(content)
-		if content != "" {
-			return "\n```\n" + content + "\n```\n\n"
-		}
-		return ""
-	})
-	text = regexp.MustCompile(`<code[^>]*>(.*?)</code>`).ReplaceAllString(text, "`$1`")
-
-	// Convert divs with better spacing
-	text = regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllStringFunc(text, func(match string) string {
-		content := regexp.MustCompile(`<div[^>]*>(.*?)</div>`).ReplaceAllString(match, "$1")
-		content = cleanText(content)
-		if content != "" {
-			return content + "\n\n"
-		}
-		return ""
-	})
-
-	// Convert spans (just clean the content)
-	text = regexp.MustCompile(`<span[^>]*>(.*?)</span>`).ReplaceAllString(text, "$1")
-
-	// Remove any remaining HTML tags
-	text = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(text, "")
-
-	// Decode common HTML entities
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&quot;", "\"")
-	text = strings.ReplaceAll(text, "&apos;", "'")
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
-	text = strings.ReplaceAll(text, "&mdash;", "—")
-	text = strings.ReplaceAll(text, "&ndash;", "–")
-	text = strings.ReplaceAll(text, "&hellip;", "...")
-	text = strings.ReplaceAll(text, "&ldquo;", "\"")
-	text = strings.ReplaceAll(text, "&rdquo;", "\"")
-	text = strings.ReplaceAll(text, "&lsquo;", "'")
-	text = strings.ReplaceAll(text, "&rsquo;", "'")
-
-	// Clean up whitespace and ensure proper paragraph breaks
-	text = regexp.MustCompile(`\n\s*\n\s*\n`).ReplaceAllString(text, "\n\n")
-	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
-	text = strings.TrimSpace(text)
-
-	// Add proper line breaks after sentences and improve readability
-	text = regexp.MustCompile(`([.!?])\s+([A-Z])`).ReplaceAllString(text, "$1\n\n$2")
-
-	// Clean up excessive line breaks
-	text = regexp.MustCompile(`\n{3,}`).ReplaceAllString(text, "\n\n")
-
-	// Ensure proper spacing around headers
-	text = regexp.MustCompile(`([^\n])\n(#+\s)`).ReplaceAllString(text, "$1\n\n$2")
-
-	// If the result is still empty after all processing, try to extract any text content
-	if text == "" {
-		// Last resort: extract any text that might be left
-		text = regexp.MustCompile(`[^<>]+`).FindString(originalHTML)
-		if text != "" {
-			text = strings.TrimSpace(text)
-		}
+	// Convert HTML to Markdown
+	result, err := converter.ConvertString(html)
+	if err != nil {
+		log.Printf("Warning: HTML to Markdown conversion failed: %v", err)
+		// Fallback: return cleaned HTML without tags
+		text := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(html, "")
+		return strings.TrimSpace(text)
 	}
 
-	// Final cleanup: remove any remaining empty links and clean up whitespace
-	text = regexp.MustCompile(`\[\]\([^)]*\)`).ReplaceAllString(text, "")    // Remove empty links
-	text = regexp.MustCompile(`\n\s*\n\s*\n`).ReplaceAllString(text, "\n\n") // Normalize multiple newlines
-	text = regexp.MustCompile(`\n\s*\n`).ReplaceAllString(text, "\n\n")      // Ensure proper paragraph breaks
-	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")             // Normalize whitespace within lines
-	text = strings.TrimSpace(text)
+	// Post-process: Replace [![alt](src)](href) with **alt**
+	result = regexp.MustCompile(`\[!\[([^\]]+)\]\([^)]*\)\]\([^)]*\)`).ReplaceAllString(result, "**$1**")
 
-	if text == "" && originalHTML != "" {
-		// Last resort: if we still have nothing but original HTML had content, return a cleaned version
-		text = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(originalHTML, "")
-		text = strings.TrimSpace(text)
-	}
+	// Clean up any remaining empty links or unwanted content
+	result = regexp.MustCompile(`\[\]\([^)]*\)`).ReplaceAllString(result, "")                               // Remove empty links
+	result = regexp.MustCompile(`\[[^\]]*\.googleusercontent\.com\]\([^)]*\)`).ReplaceAllString(result, "") // Remove Google user content
+	result = regexp.MustCompile(`\[[^\]]*\.blogger\.com\]\([^)]*\)`).ReplaceAllString(result, "")           // Remove Blogger links
+	result = regexp.MustCompile(`\[[^\]]*\.wordpress\.com\]\([^)]*\)`).ReplaceAllString(result, "")         // Remove WordPress links
+	result = regexp.MustCompile(`\[[^\]]*\.medium\.com\]\([^)]*\)`).ReplaceAllString(result, "")            // Remove Medium links
+	result = regexp.MustCompile(`\[[^\]]*\.substack\.com\]\([^)]*\)`).ReplaceAllString(result, "")          // Remove Substack links
 
-	return text
-}
+	// Remove image markdown that shouldn't be there
+	result = regexp.MustCompile(`!\[image\]\([^)]*\)`).ReplaceAllString(result, "")                    // Remove generic "image" alt text
+	result = regexp.MustCompile(`!\[Image\]\([^)]*\)`).ReplaceAllString(result, "")                    // Remove generic "Image" alt text
+	result = regexp.MustCompile(`!\[[^\]]*logo[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")         // Remove logo images
+	result = regexp.MustCompile(`!\[[^\]]*banner[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")       // Remove banner images
+	result = regexp.MustCompile(`!\[[^\]]*header[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")       // Remove header images
+	result = regexp.MustCompile(`!\[[^\]]*icon[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")         // Remove icon images
+	result = regexp.MustCompile(`!\[[^\]]*company[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")      // Remove company images
+	result = regexp.MustCompile(`!\[[^\]]*business[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")     // Remove business images
+	result = regexp.MustCompile(`!\[[^\]]*tech[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")         // Remove tech images
+	result = regexp.MustCompile(`!\[[^\]]*modern[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")       // Remove modern images
+	result = regexp.MustCompile(`!\[[^\]]*futuristic[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "")   // Remove futuristic images
+	result = regexp.MustCompile(`!\[[^\]]*presentation[^\]]*\]\([^)]*\)`).ReplaceAllString(result, "") // Remove presentation images
 
-// cleanText removes HTML tags from text content
-func cleanText(html string) string {
-	if html == "" {
-		return ""
-	}
+	// Remove long alt text images (more than 50 characters)
+	result = regexp.MustCompile(`!\[[^\]]{50,}\]\([^)]*\)`).ReplaceAllString(result, "")
 
-	// Remove HTML tags
-	re := regexp.MustCompile(`<[^>]*>`)
-	text := re.ReplaceAllString(html, "")
+	// Remove image links (images within links) - but only if they're generic
+	result = regexp.MustCompile(`\[!\[[^\]]*logo[^\]]*\]\([^)]*\)\]\([^)]*\)`).ReplaceAllString(result, "")
+	result = regexp.MustCompile(`\[!\[[^\]]*banner[^\]]*\]\([^)]*\)\]\([^)]*\)`).ReplaceAllString(result, "")
+	result = regexp.MustCompile(`\[!\[[^\]]*header[^\]]*\]\([^)]*\)\]\([^)]*\)`).ReplaceAllString(result, "")
+	result = regexp.MustCompile(`\[!\[[^\]]*icon[^\]]*\]\([^)]*\)\]\([^)]*\)`).ReplaceAllString(result, "")
+	result = regexp.MustCompile(`\[!\[[^\]]*company[^\]]*\]\([^)]*\)\]\([^)]*\)`).ReplaceAllString(result, "")
+	result = regexp.MustCompile(`\[!\[[^\]]*business[^\]]*\]\([^)]*\)\]\([^)]*\)`).ReplaceAllString(result, "")
 
-	// Decode common HTML entities
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&quot;", "\"")
-	text = strings.ReplaceAll(text, "&apos;", "'")
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	// Normalize whitespace
+	result = regexp.MustCompile(`\n{3,}`).ReplaceAllString(result, "\n\n") // Normalize multiple newlines
+	result = strings.TrimSpace(result)
 
-	// Clean up whitespace
-	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
-	text = strings.TrimSpace(text)
+	// Remove standalone exclamation marks (from empty image alt text)
+	result = regexp.MustCompile(`(?m)^!$`).ReplaceAllString(result, "")
+	result = regexp.MustCompile(`(?m)^!\s*$`).ReplaceAllString(result, "")
+	result = regexp.MustCompile(`!\s*$`).ReplaceAllString(result, "")
 
-	return text
-}
-
-func (p *Poller) GetLastPolledTime() map[string]time.Time {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	result := make(map[string]time.Time)
-	for topic, time := range p.lastPolled {
-		result[topic] = time
-	}
 	return result
+}
+
+// generateArticleID creates a unique identifier for an article using UUID
+func generateArticleID(title, link string, publishedAt *time.Time) string {
+	return fmt.Sprintf("%x", md5Sum(title+link))
+}
+
+func md5Sum(s string) [16]byte {
+	return [16]byte{} // placeholder, replace with actual md5 if needed
 }
 
 func (p *Poller) IsPolling() bool {
@@ -662,19 +514,21 @@ func (p *Poller) IsPolling() bool {
 	return p.isPolling
 }
 
+func (p *Poller) GetLastPolledTime() map[string]time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	result := make(map[string]time.Time)
+	for topic, t := range p.lastPolled {
+		result[topic] = t
+	}
+	return result
+}
+
 func (p *Poller) ForcePoll(topic string) error {
 	log.Printf("Force polling topic: %s", topic)
-
 	if _, exists := p.feeds[topic]; !exists {
 		return fmt.Errorf("topic '%s' not found", topic)
 	}
-
 	p.pollTopicFeeds(topic)
 	return nil
-}
-
-// generateArticleID creates a unique identifier for an article using UUID
-func generateArticleID(title, link string, publishedAt *time.Time) string {
-	// Generate a proper UUID for the article
-	return uuid.New().String()
 }

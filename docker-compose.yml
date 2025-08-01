@@ -12,8 +12,16 @@ services:
       - DATA_DIR=/app/data
       - LOG_LEVEL=info
       - POLL_INTERVAL=15m
+      - ARTICLE_RETENTION=720h
       - ENABLE_SPA=true
       - ENABLE_SWAGGER=true
+      
+      # Storage Optimization Configuration
+      - ENABLE_CONTENT_COMPRESSION=false
+      - MAX_CONTENT_LENGTH=10000
+      - ENABLE_DUPLICATE_REMOVAL=true
+      - DATABASE_OPTIMIZE_INTERVAL=3600
+      - FORCE_DB_RECREATE=false
       
       # Security Configuration
       - ENABLE_RATE_LIMIT=true

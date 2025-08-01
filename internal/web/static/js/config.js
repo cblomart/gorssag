@@ -12,94 +12,111 @@ class ConfigManager {
         }
     }
 
+    // Fetch and display feed configuration and statistics
     async loadFeedConfiguration() {
         try {
-            const response = await fetch('/api/v1/feeds');
-            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            // Fetch feed configuration and status
+            const feedsResponse = await fetch('/api/v1/feeds');
+            const feedsData = await feedsResponse.json();
             
-            const data = await response.json();
-            this.renderFeedConfiguration(data.feeds);
+            // Fetch feed statistics
+            const statsResponse = await fetch('/api/v1/feeds/stats');
+            const statsData = await statsResponse.json();
+            
+            // Create a map of feed statistics by source
+            const feedStats = {};
+            if (statsData.feeds) {
+                statsData.feeds.forEach(feed => {
+                    feedStats[feed.source] = feed;
+                });
+            }
+            
+            this.renderFeedConfiguration(feedsData.feeds, feedStats);
         } catch (error) {
-            console.error('Failed to load feed configuration:', error);
-            this.showError('Failed to load feed configuration: ' + error.message);
+            console.error('Error loading feed configuration:', error);
+            document.getElementById('feedConfig').innerHTML = '<p class="error">Error loading feed configuration</p>';
         }
     }
 
-    renderFeedConfiguration(feeds) {
+    // Helper function to extract source name from URL
+    getSourceFromUrl(url) {
+        try {
+            const urlObj = new URL(url);
+            const hostname = urlObj.hostname;
+            
+            // Map common hostnames to readable source names
+            const sourceMap = {
+                'feeds.feedburner.com': 'Feedburner',
+                'feeds.reuters.com': 'Reuters',
+                'rss.cnn.com': 'CNN',
+                'feeds.bbci.co.uk': 'BBC',
+                'feeds.npr.org': 'NPR',
+                'blog.golang.org': 'The Go Blog',
+                'www.reddit.com': 'Reddit',
+                'feeds.arstechnica.com': 'Ars Technica',
+                'feeds.feedburner.com': 'Feedburner'
+            };
+            
+            return sourceMap[hostname] || hostname;
+        } catch (e) {
+            return 'Unknown Source';
+        }
+    }
+
+    renderFeedConfiguration(topics, feedStats) {
         const configContainer = document.getElementById('feedConfig');
         if (!configContainer) return;
 
-        if (!feeds || Object.keys(feeds).length === 0) {
-            configContainer.innerHTML = `
-                <div class="no-config">
-                    <i class="fas fa-exclamation-circle"></i>
-                    <p>No feed configuration found</p>
-                </div>
-            `;
-            return;
-        }
-
-        const configHTML = Object.entries(feeds).map(([topic, config]) => {
-            const urls = config.urls || [];
-            const filters = config.filters || [];
-            const feeds = config.feeds || [];
-            
-            return `
-                <div class="config-card">
-                    <div class="config-header">
-                        <h3><i class="fas fa-tag"></i> ${this.escapeHtml(topic)}</h3>
-                        <span class="topic-badge">${topic}</span>
+        let html = '<div class="feed-config-grid">';
+        
+        Object.entries(topics).forEach(([topicName, topicData]) => {
+            html += `
+                <div class="topic-card">
+                    <div class="topic-header">
+                        <h2>${topicName.toUpperCase()}</h2>
                     </div>
-                    
-                    <div class="config-content">
-                        <div class="config-section">
-                            <h4><i class="fas fa-link"></i> Feed URLs (${urls.length})</h4>
-                            ${urls.length > 0 ? `
-                                <ul class="url-list">
-                                    ${urls.map(url => {
-                                        const feed = feeds.find(f => f.url === url);
-                                        const healthIcon = this.getHealthIcon(feed);
-                                        const healthTooltip = feed ? this.getHealthTooltip(feed) : '';
-                                        
-                                        return `
-                                            <li class="url-item">
-                                                <div class="url-header">
-                                                    ${healthIcon}
-                                                    <a href="${this.escapeHtml(url)}" target="_blank" class="feed-url">
-                                                        ${this.escapeHtml(url)}
-                                                    </a>
-                                                </div>
-                                                ${healthTooltip ? `<div class="health-tooltip">${healthTooltip}</div>` : ''}
-                                            </li>
-                                        `;
-                                    }).join('')}
-                                </ul>
-                            ` : `
-                                <p class="no-urls">No feed URLs configured</p>
-                            `}
+                    <div class="topic-filters">
+                        <h4>Filters:</h4>
+                        <div class="filter-tags">
+                            ${topicData.filters ? topicData.filters.map(filter => 
+                                `<span class="filter-tag">${this.escapeHtml(filter)}</span>`
+                            ).join('') : '<span class="no-filters">No filters</span>'}
                         </div>
-                        
-                        <div class="config-section">
-                            <h4><i class="fas fa-filter"></i> Filters (${filters.length})</h4>
-                            ${filters.length > 0 ? `
-                                <ul class="filter-list">
-                                    ${filters.map(filter => `
-                                        <li class="filter-item">
-                                            <i class="fas fa-tag"></i>
-                                            <span class="filter-tag">${this.escapeHtml(filter)}</span>
-                                        </li>
-                                    `).join('')}
-                                </ul>
-                            ` : `
-                                <p class="no-filters">No filters configured</p>
-                            `}
-                        </div>
+                    </div>
+                    <div class="topic-feeds">
+                        <h4>Feeds:</h4>
+                        ${topicData.feeds ? topicData.feeds.map(feed => {
+                            const healthIcon = this.getHealthIcon(feed);
+                            const sourceName = this.getSourceFromUrl(feed.url);
+                            const stats = feedStats[sourceName] || {};
+                            
+                            return `
+                                <div class="feed-item">
+                                    <div class="feed-header">
+                                        <span class="feed-source">${sourceName}</span>
+                                        <span class="health-icon" title="${feed.last_error || feed.reason || 'Healthy'}">${healthIcon}</span>
+                                    </div>
+                                    <div class="feed-details">
+                                        <p><strong>URL:</strong> <a href="${feed.url}" target="_blank">${feed.url}</a></p>
+                                        <p><strong>Status:</strong> <span class="status-${feed.status}">${feed.status}</span></p>
+                                        <p><strong>Articles:</strong> ${feed.articles_count || 0}</p>
+                                        <p><strong>Last Polled:</strong> ${new Date(feed.last_polled).toLocaleString()}</p>
+                                        ${feed.reason ? `<p><strong>Reason:</strong> <span class="reason-text">${this.escapeHtml(feed.reason)}</span></p>` : ''}
+                                        ${feed.last_error ? `<p><strong>Error:</strong> <span class="error-text">${this.escapeHtml(feed.last_error)}</span></p>` : ''}
+                                        ${feed.user_agent ? `<p><strong>User Agent:</strong> <code>${this.escapeHtml(feed.user_agent)}</code></p>` : ''}
+                                        ${stats.non_english_count ? `<p><strong>Non-English:</strong> ${stats.non_english_count}</p>` : ''}
+                                        ${stats.avg_content_size ? `<p><strong>Avg Size:</strong> ${this.formatBytes(stats.avg_content_size)}</p>` : ''}
+                                    </div>
+                                </div>
+                            `;
+                        }).join('') : '<p>No feeds configured</p>'}
                     </div>
                 </div>
             `;
-        }).join('');
-
-        configContainer.innerHTML = configHTML;
+        });
+        
+        html += '</div>';
+        configContainer.innerHTML = html;
     }
 
     renderFeedStatus(feeds) {
@@ -281,6 +298,15 @@ class ConfigManager {
         }
         
         return tooltip;
+    }
+
+    formatBytes(bytes, decimals = 2) {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
     }
 }
 

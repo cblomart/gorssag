@@ -100,7 +100,7 @@ func SetupSecurityMiddleware(router *gin.Engine, config *SecurityConfig) {
 			FrameDeny:             false, // Allow iframes for Swagger docs
 			ContentTypeNosniff:    true,
 			BrowserXssFilter:      true,
-			ContentSecurityPolicy: "default-src 'self'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:;",
+			ContentSecurityPolicy: "default-src 'self'; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data: https:;",
 			ReferrerPolicy:        "strict-origin-when-cross-origin",
 		}))
 	}

@@ -26,15 +26,22 @@ type SecurityConfig struct {
 }
 
 type Config struct {
-	Port          int
-	CacheTTL      time.Duration
-	DataDir       string
-	Feeds         map[string]TopicConfig
-	LogLevel      string
-	PollInterval  time.Duration
-	EnableSPA     bool
-	EnableSwagger bool
-	Security      SecurityConfig
+	Port             int
+	CacheTTL         time.Duration
+	DataDir          string
+	Feeds            map[string]TopicConfig
+	LogLevel         string
+	PollInterval     time.Duration
+	EnableSPA        bool
+	EnableSwagger    bool
+	Security         SecurityConfig
+	ArticleRetention time.Duration // How long to keep articles in storage
+
+	// Storage optimization settings
+	EnableContentCompression bool
+	MaxContentLength         int // Maximum content length to store
+	EnableDuplicateRemoval   bool
+	DatabaseOptimizeInterval time.Duration // How often to run database optimization
 }
 
 func Load() *Config {
@@ -45,6 +52,13 @@ func Load() *Config {
 	pollInterval := getEnvAsDuration("POLL_INTERVAL", 15*time.Minute)
 	enableSPA := getEnvAsBool("ENABLE_SPA", true)
 	enableSwagger := getEnvAsBool("ENABLE_SWAGGER", true)
+	articleRetention := getEnvAsDuration("ARTICLE_RETENTION", 30*24*time.Hour) // 30 days default
+
+	// Storage optimization settings
+	enableContentCompression := getEnvAsBool("ENABLE_CONTENT_COMPRESSION", true)
+	maxContentLength := getEnvAsInt("MAX_CONTENT_LENGTH", 50000) // 50KB default
+	enableDuplicateRemoval := getEnvAsBool("ENABLE_DUPLICATE_REMOVAL", true)
+	databaseOptimizeInterval := getEnvAsDuration("DATABASE_OPTIMIZE_INTERVAL", 24*time.Hour) // Daily
 
 	// Load security configuration
 	security := loadSecurityConfig()
@@ -58,15 +72,20 @@ func Load() *Config {
 	}
 
 	return &Config{
-		Port:          port,
-		CacheTTL:      cacheTTL,
-		DataDir:       dataDir,
-		Feeds:         feeds,
-		LogLevel:      logLevel,
-		PollInterval:  pollInterval,
-		EnableSPA:     enableSPA,
-		EnableSwagger: enableSwagger,
-		Security:      security,
+		Port:                     port,
+		CacheTTL:                 cacheTTL,
+		DataDir:                  dataDir,
+		Feeds:                    feeds,
+		LogLevel:                 logLevel,
+		PollInterval:             pollInterval,
+		EnableSPA:                enableSPA,
+		EnableSwagger:            enableSwagger,
+		Security:                 security,
+		ArticleRetention:         articleRetention,
+		EnableContentCompression: enableContentCompression,
+		MaxContentLength:         maxContentLength,
+		EnableDuplicateRemoval:   enableDuplicateRemoval,
+		DatabaseOptimizeInterval: databaseOptimizeInterval,
 	}
 }
 

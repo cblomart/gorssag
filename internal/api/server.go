@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +28,7 @@ type Server struct {
 	port          int
 	spaServer     *web.SPAServer
 	swaggerServer *web.SwaggerServer
+	config        *config.Config
 }
 
 func NewServer(agg *aggregator.Aggregator, poller *poller.Poller, cfg *config.Config) *Server {
@@ -32,7 +36,16 @@ func NewServer(agg *aggregator.Aggregator, poller *poller.Poller, cfg *config.Co
 
 	// Load HTML templates from filesystem (only if SPA is enabled)
 	if cfg.EnableSPA {
-		router.LoadHTMLGlob("internal/web/templates/*")
+		// Get the current working directory
+		wd, err := os.Getwd()
+		if err != nil {
+			log.Printf("Warning: could not get working directory: %v", err)
+			wd = "."
+		}
+
+		templatePath := filepath.Join(wd, "internal", "web", "templates", "*")
+		log.Printf("Loading templates from: %s", templatePath)
+		router.LoadHTMLGlob(templatePath)
 	}
 
 	// Setup security middleware
@@ -59,6 +72,7 @@ func NewServer(agg *aggregator.Aggregator, poller *poller.Poller, cfg *config.Co
 		port:          cfg.Port,
 		spaServer:     spaServer,
 		swaggerServer: swaggerServer,
+		config:        cfg,
 	}
 
 	server.setupRoutes()
@@ -74,15 +88,25 @@ func (s *Server) setupRoutes() {
 	{
 		api.GET("/topics", s.getTopics)
 		api.GET("/articles", s.getAllArticles)
+		api.GET("/test", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"message": "test route working"})
+		})
+		api.GET("/feeds", s.getFeeds) // New endpoint for feed configuration
 		api.GET("/feeds/:topic", s.getAggregatedFeed)
 		api.GET("/feeds/:topic/info", s.getFeedInfo)
 		api.POST("/feeds/:topic/refresh", s.refreshFeed)
-		api.GET("/feeds", s.getFeeds) // New endpoint for feed configuration
 
-		// Poller control endpoints
+		// Poller management endpoints
 		api.GET("/poller/status", s.getPollerStatus)
 		api.POST("/poller/force-poll/:topic", s.forcePollTopic)
 		api.GET("/poller/last-polled", s.getLastPolledTimes)
+
+		// Storage optimization endpoints
+		api.GET("/storage/stats", s.getStorageStats)
+		api.POST("/storage/optimize", s.optimizeStorage)
+
+		// Feed statistics endpoint
+		api.GET("/feeds/stats", s.getFeedStats)
 	}
 
 	// Register web interfaces
@@ -92,6 +116,37 @@ func (s *Server) setupRoutes() {
 
 func (s *Server) Start() error {
 	return s.router.Run(":" + strconv.Itoa(s.port))
+}
+
+func (s *Server) StartWithContext(ctx context.Context) error {
+	// Create a server that can be gracefully shut down
+	srv := &http.Server{
+		Addr:    ":" + strconv.Itoa(s.port),
+		Handler: s.router,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Server error: %v", err)
+		}
+	}()
+
+	// Wait for context cancellation
+	<-ctx.Done()
+
+	// Graceful shutdown
+	log.Println("Shutting down server gracefully...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
+		return err
+	}
+
+	log.Println("Server stopped gracefully")
+	return context.Canceled
 }
 
 func (s *Server) healthCheck(c *gin.Context) {
@@ -239,7 +294,11 @@ func (s *Server) getAllArticles(c *gin.Context) {
 		log.Printf("DEBUG: Getting articles from all topics")
 
 		topics := s.aggregator.GetAvailableTopics()
-		for _, topic := range topics {
+		log.Printf("DEBUG: Found %d topics: %v", len(topics), topics)
+
+		for i, topic := range topics {
+			log.Printf("DEBUG: Processing topic %d/%d: %s", i+1, len(topics), topic)
+
 			// Create a topic-specific query
 			topicQuery := &models.ODataQuery{
 				Filter:  query.Filter,
@@ -249,24 +308,48 @@ func (s *Server) getAllArticles(c *gin.Context) {
 				// Don't apply pagination at topic level, we'll do it globally
 			}
 
-			feed, err := s.aggregator.GetAggregatedFeed(topic, topicQuery)
-			if err != nil {
-				log.Printf("Warning: failed to get feed for topic '%s': %v", topic, err)
+			// Add timeout context to prevent hanging
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			// Use a channel to handle the async call with timeout
+			resultChan := make(chan struct {
+				feed *models.AggregatedFeed
+				err  error
+			}, 1)
+
+			go func(t string, q *models.ODataQuery) {
+				feed, err := s.aggregator.GetAggregatedFeed(t, q)
+				resultChan <- struct {
+					feed *models.AggregatedFeed
+					err  error
+				}{feed, err}
+			}(topic, topicQuery)
+
+			select {
+			case result := <-resultChan:
+				if result.err != nil {
+					log.Printf("Warning: failed to get feed for topic '%s': %v", topic, result.err)
+					continue
+				}
+				if result.feed == nil {
+					log.Printf("Warning: feed is nil for topic '%s'", topic)
+					continue
+				}
+
+				// Add topic information to each article
+				for i := range result.feed.Articles {
+					result.feed.Articles[i].Topic = topic
+				}
+
+				log.Printf("DEBUG: Got %d articles for topic %s", len(result.feed.Articles), topic)
+				allArticles = append(allArticles, result.feed.Articles...)
+				totalCount += len(result.feed.Articles)
+
+			case <-ctx.Done():
+				log.Printf("Warning: timeout getting feed for topic '%s'", topic)
 				continue
 			}
-			if feed == nil {
-				log.Printf("Warning: feed is nil for topic '%s'", topic)
-				continue
-			}
-
-			// Add topic information to each article
-			for i := range feed.Articles {
-				feed.Articles[i].Topic = topic
-			}
-
-			log.Printf("DEBUG: Got %d articles for topic %s", len(feed.Articles), topic)
-			allArticles = append(allArticles, feed.Articles...)
-			totalCount += len(feed.Articles)
 		}
 
 		log.Printf("DEBUG: Total articles collected: %d", len(allArticles))
@@ -503,7 +586,9 @@ func (s *Server) refreshFeed(c *gin.Context) {
 
 func (s *Server) getPollerStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"is_polling": s.poller.IsPolling(),
+		"status": gin.H{
+			"is_polling": s.poller.IsPolling(),
+		},
 	})
 }
 
@@ -525,7 +610,9 @@ func (s *Server) forcePollTopic(c *gin.Context) {
 
 func (s *Server) getLastPolledTimes(c *gin.Context) {
 	lastPolled := s.poller.GetLastPolledTime()
-	c.JSON(http.StatusOK, lastPolled)
+	c.JSON(http.StatusOK, gin.H{
+		"last_polled": lastPolled,
+	})
 }
 
 // applyAdvancedFilters applies advanced filtering options to articles
@@ -604,5 +691,46 @@ func (s *Server) getFeeds(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"feeds": feedStatusResponse,
+		"config": gin.H{
+			"article_retention": s.config.ArticleRetention.String(),
+			"poll_interval":     s.config.PollInterval.String(),
+			"cache_ttl":         s.config.CacheTTL.String(),
+		},
+	})
+}
+
+// getStorageStats returns database statistics
+func (s *Server) getStorageStats(c *gin.Context) {
+	stats, err := s.aggregator.GetStorageStats()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"stats": stats,
+	})
+}
+
+// optimizeStorage triggers storage optimization
+func (s *Server) optimizeStorage(c *gin.Context) {
+	// Get storage from aggregator (we need to access it directly)
+	// For now, we'll just return a message that optimization runs automatically
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Storage optimization runs automatically. Check logs for details.",
+		"note":    "Use the background polling to trigger optimization",
+	})
+}
+
+// getFeedStats returns detailed feed statistics
+func (s *Server) getFeedStats(c *gin.Context) {
+	stats, err := s.aggregator.GetFeedStats()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"stats": stats,
 	})
 }
