@@ -128,7 +128,6 @@ func (a *Aggregator) PollFeed(feedURL string) error {
 	if !a.ShouldRetryFeed(feedURL) {
 		status, exists := a.feedStatus[feedURL]
 		if exists && status.IsDisabled {
-			a.mu.RUnlock()
 			return fmt.Errorf("feed is disabled: %s", status.DisabledReason)
 		}
 	}
@@ -853,13 +852,10 @@ func (a *Aggregator) fetchFeedsParallel(feedURLs []string, topic string) ([]mode
 func (a *Aggregator) fetchFeed(url string, topic string) ([]models.Article, error) {
 	// Check if feed should be retried
 	if !a.ShouldRetryFeed(url) {
-		a.mu.RLock()
 		status, exists := a.feedStatus[url]
 		if exists && status.IsDisabled {
-			a.mu.RUnlock()
 			return nil, fmt.Errorf("feed is disabled: %s", status.DisabledReason)
 		}
-		a.mu.RUnlock()
 	}
 
 
