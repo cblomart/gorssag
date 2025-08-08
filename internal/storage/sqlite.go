@@ -37,20 +37,6 @@ func getGoroutineID() uint64 {
 	return uint64(numGoroutines) + uint64(time.Now().UnixNano()%1000)
 }
 
-// getTopicMutex returns a mutex for the specified topic, creating it if it doesn't exist
-func (s *SQLiteStorage) getTopicMutex(topic string) *sync.Mutex {
-	s.topicMutexLock.Lock()
-	defer s.topicMutexLock.Unlock()
-
-	if mutex, exists := s.topicMutexes[topic]; exists {
-		return mutex
-	}
-
-	mutex := &sync.Mutex{}
-	s.topicMutexes[topic] = mutex
-	return mutex
-}
-
 type SQLiteStorage struct {
 	db             *sql.DB
 	config         *config.Config
@@ -348,13 +334,6 @@ func (s *SQLiteStorage) CleanupOldArticles(retentionPeriod time.Duration) error 
 }
 
 func (s *SQLiteStorage) SaveFeed(topic string, feed *models.AggregatedFeed) error {
-	topicMutex := s.getTopicMutex(topic)
-	log.Printf("SaveFeed: [THREAD-%d] Acquiring topic-specific mutex lock for topic '%s'", getGoroutineID(), topic)
-	topicMutex.Lock()
-	defer func() {
-		log.Printf("SaveFeed: [THREAD-%d] Releasing topic-specific mutex lock for topic '%s'", getGoroutineID(), topic)
-		topicMutex.Unlock()
-	}()
 
 	log.Printf("SaveFeed: [THREAD-%d] Starting to save %d articles for topic '%s'", getGoroutineID(), len(feed.Articles), topic)
 

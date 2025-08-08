@@ -32,7 +32,7 @@ type Aggregator struct {
 	storage      storage.Storage
 	cacheManager *cache.Manager
 	feedStatus   map[string]*models.FeedStatus // Track feed status
-	mu           sync.RWMutex
+	// mu           sync.RWMutex -- sqlite should handle mutex - or storage ny itself
 	parser       *gofeed.Parser
 	filterParser *odata.FilterParser
 
@@ -86,9 +86,6 @@ func (a *Aggregator) GetConfig() map[string]config.TopicConfig {
 
 // GetAllUniqueFeedURLs returns all unique RSS feed URLs across all topics
 func (a *Aggregator) GetAllUniqueFeedURLs() []string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
 	urlSet := make(map[string]bool)
 	for _, topicConfig := range a.feeds {
 		for _, url := range topicConfig.URLs {
@@ -109,9 +106,6 @@ func (a *Aggregator) GetAllUniqueFeedURLs() []string {
 
 // GetTopicsForFeed returns all topics that use a specific feed URL
 func (a *Aggregator) GetTopicsForFeed(feedURL string) []string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
 	var topics []string
 	for topic, topicConfig := range a.feeds {
 		for _, url := range topicConfig.URLs {
@@ -130,14 +124,10 @@ func (a *Aggregator) GetTopicsForFeed(feedURL string) []string {
 
 // PollFeed polls a single feed and stores articles centrally
 func (a *Aggregator) PollFeed(feedURL string) error {
-	// Use RLock for reading operations
-	a.mu.RLock()
-
 	// Check if we should retry this feed
 	if !a.ShouldRetryFeed(feedURL) {
 		status, exists := a.feedStatus[feedURL]
 		if exists && status.IsDisabled {
-			a.mu.RUnlock()
 			return fmt.Errorf("feed is disabled: %s", status.DisabledReason)
 		}
 	}
@@ -148,8 +138,6 @@ func (a *Aggregator) PollFeed(feedURL string) error {
 	if exists && status.UserAgent != "" {
 		userAgent = status.UserAgent
 	}
-
-	a.mu.RUnlock() // Release RLock before calling other methods
 
 	// Try to fetch with stored User-Agent first
 	var feed *gofeed.Feed
@@ -474,9 +462,6 @@ func getPublishedTime(item *gofeed.Item) time.Time {
 
 // GetFeedStatus returns the status of all feeds
 func (a *Aggregator) GetFeedStatus() map[string]*models.FeedStatus {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
 	// Create a copy to avoid race conditions
 	status := make(map[string]*models.FeedStatus)
 	for url, feedStatus := range a.feedStatus {
@@ -487,7 +472,6 @@ func (a *Aggregator) GetFeedStatus() map[string]*models.FeedStatus {
 
 // TestUserAgentForFeed tests different User-Agents to find one that works
 func (a *Aggregator) TestUserAgentForFeed(url string) (string, error) {
-	a.mu.Lock()
 	status, exists := a.feedStatus[url]
 	if !exists {
 		status = &models.FeedStatus{
@@ -496,7 +480,6 @@ func (a *Aggregator) TestUserAgentForFeed(url string) (string, error) {
 		}
 		a.feedStatus[url] = status
 	}
-	a.mu.Unlock()
 
 	// Test each User-Agent
 	for _, userAgent := range userAgentsToTest {
@@ -534,10 +517,8 @@ func (a *Aggregator) TestUserAgentForFeed(url string) (string, error) {
 
 // testFeedWithUserAgent tests a feed with a specific User-Agent
 func (a *Aggregator) testFeedWithUserAgent(url, userAgent string) (*gofeed.Feed, error) {
-	// Get cached headers for this feed
-	a.mu.RLock()
+
 	cacheEntry, hasCache := a.feedCache[url]
-	a.mu.RUnlock()
 
 	// Create a custom HTTP client with the User-Agent
 	client := &http.Client{
@@ -578,7 +559,6 @@ func (a *Aggregator) testFeedWithUserAgent(url, userAgent string) (*gofeed.Feed,
 	}
 
 	// Store caching headers for next request
-	a.mu.Lock()
 	if a.feedCache[url] == nil {
 		a.feedCache[url] = &FeedCacheEntry{}
 	}
@@ -591,7 +571,6 @@ func (a *Aggregator) testFeedWithUserAgent(url, userAgent string) (*gofeed.Feed,
 		a.feedCache[url].LastModified = lastModified
 	}
 	a.feedCache[url].LastChecked = time.Now()
-	a.mu.Unlock()
 
 	// Parse the feed
 	parser := gofeed.NewParser()
@@ -616,16 +595,12 @@ func (a *Aggregator) isUserAgentTested(status *models.FeedStatus, userAgent stri
 
 // markUserAgentTested marks a User-Agent as tested
 func (a *Aggregator) markUserAgentTested(status *models.FeedStatus, userAgent string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	status.TestedUserAgents = append(status.TestedUserAgents, userAgent)
 }
 
 // UpdateFeedStatus updates the status of a specific feed
 func (a *Aggregator) UpdateFeedStatus(url, topic string, articlesCount int, err error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	status, exists := a.feedStatus[url]
 	if !exists {
@@ -685,8 +660,6 @@ func (a *Aggregator) UpdateFeedStatus(url, topic string, articlesCount int, err 
 
 // SetUserAgentForFeed sets the working User-Agent for a feed
 func (a *Aggregator) SetUserAgentForFeed(url, userAgent string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	status, exists := a.feedStatus[url]
 	if !exists {
@@ -716,8 +689,6 @@ func (a *Aggregator) calculateBackoff(consecutiveErrors int) int {
 
 // ShouldRetryFeed checks if a disabled feed should be retried
 func (a *Aggregator) ShouldRetryFeed(url string) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 
 	status, exists := a.feedStatus[url]
 	if !exists {
@@ -881,23 +852,18 @@ func (a *Aggregator) fetchFeedsParallel(feedURLs []string, topic string) ([]mode
 func (a *Aggregator) fetchFeed(url string, topic string) ([]models.Article, error) {
 	// Check if feed should be retried
 	if !a.ShouldRetryFeed(url) {
-		a.mu.RLock()
 		status, exists := a.feedStatus[url]
 		if exists && status.IsDisabled {
-			a.mu.RUnlock()
 			return nil, fmt.Errorf("feed is disabled: %s", status.DisabledReason)
 		}
-		a.mu.RUnlock()
 	}
 
-	// Get stored User-Agent for this feed
-	a.mu.RLock()
+
 	status, exists := a.feedStatus[url]
 	var userAgent string
 	if exists && status.UserAgent != "" {
 		userAgent = status.UserAgent
 	}
-	a.mu.RUnlock()
 
 	// Try to fetch with stored User-Agent first
 	var feed *gofeed.Feed
@@ -1204,8 +1170,6 @@ type FeedHealth struct {
 
 // GetFeedHealth returns health status for all feeds
 func (a *Aggregator) GetFeedHealth() map[string][]FeedHealth {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
 
 	health := make(map[string][]FeedHealth)
 
