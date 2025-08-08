@@ -1,0 +1,141 @@
+version: '3.8'
+
+services:
+  rss-aggregator:
+    image: gorssag:latest  # You can change this to ghcr.io/cblomart/gorssag:latest if using the registry
+    ports:
+      - "8080:8080"
+    environment:
+      # Basic Configuration
+      - PORT=8080
+      - CACHE_TTL=15m
+      - DATA_DIR=/app/data
+      - LOG_LEVEL=info
+      - POLL_INTERVAL=15m
+      - ARTICLE_RETENTION=720h
+      - ENABLE_SPA=true
+      - ENABLE_SWAGGER=true
+      
+      # Storage Optimization Configuration
+      - ENABLE_CONTENT_COMPRESSION=false
+      - MAX_CONTENT_LENGTH=10000
+      - ENABLE_DUPLICATE_REMOVAL=true
+      - DATABASE_OPTIMIZE_INTERVAL=3600
+      - FORCE_DB_RECREATE=false
+      
+      # Security Configuration
+      - ENABLE_RATE_LIMIT=true
+      - RATE_LIMIT_PER_SECOND=10.0
+      - RATE_LIMIT_BURST=20
+      - ENABLE_CORS=true
+      - ALLOWED_ORIGINS=*
+      - ENABLE_SECURITY_HEADERS=true
+      - MAX_REQUEST_SIZE=10485760
+      - ENABLE_REQUEST_ID=true
+      
+      # RSS Feed Configuration
+      # Format: FEED_TOPIC_<TOPIC>=url1,url2,url3|filter1,filter2,filter3
+      - FEED_TOPIC_TECH=https://feeds.feedburner.com/TechCrunch,https://feeds.arstechnica.com/arstechnica/index,https://feeds.feedburner.com/TheHackersNews|AI,artificial intelligence,machine learning,blockchain,cryptocurrency
+      - FEED_TOPIC_NEWS=https://feeds.npr.org/1001/rss.xml,https://feeds.feedburner.com/TheHackersNews,https://feeds.bbci.co.uk/news/rss.xml|technology,innovation,digital,startup,cybersecurity
+      - FEED_TOPIC_PROGRAMMING=https://blog.golang.org/feed.atom,https://feeds.feedburner.com/oreilly/go,https://www.reddit.com/r/golang/.rss|Go,golang,programming,development,software
+      - FEED_TOPIC_CRYPTOS=https://feeds.feedburner.com/TheHackersNews,https://feeds.npr.org/1001/rss.xml,https://feeds.bbci.co.uk/news/rss.xml|bitcoin,btc,crypto,cryptocurrency,ethereum,blockchain
+    volumes:
+      - rss_data:/app/data
+    networks:
+      - rss_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      mode: replicated
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == worker
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: pause
+        order: stop-first
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.rss-aggregator.rule=Host(`rss.yourdomain.com`)
+        - traefik.http.routers.rss-aggregator.tls=true
+        - traefik.http.routers.rss-aggregator.tls.certresolver=letsencrypt
+        - traefik.http.services.rss-aggregator.loadbalancer.server.port=8080
+
+  # Optional: Add Traefik as reverse proxy for production deployments
+  traefik:
+    image: traefik:v3.0
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.swarmMode=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.email=your-email@example.com
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    networks:
+      - rss_network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.traefik.rule=Host(`traefik.yourdomain.com`)
+        - traefik.http.routers.traefik.tls=true
+        - traefik.http.routers.traefik.tls.certresolver=letsencrypt
+        - traefik.http.services.traefik.loadbalancer.server.port=8080
+
+volumes:
+  rss_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/rss-aggregator/data
+  traefik_letsencrypt:
+    driver: local
+
+networks:
+  rss_network:
+    driver: overlay
+    attachable: true
