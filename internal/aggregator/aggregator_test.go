@@ -873,20 +873,38 @@ func TestGenerateArticleID(t *testing.T) {
 	id1 := generateArticleID(title, link, &publishedAt)
 	id2 := generateArticleID(title, link, &publishedAt)
 
-	// Should generate different UUIDs
-	if id1 == id2 {
-		t.Error("Expected different IDs for same input")
+	// Should generate same deterministic IDs for same input
+	if id1 != id2 {
+		t.Error("Expected same deterministic IDs for same input")
 	}
 
-	// Should be valid UUID format
+	// Should be UUID format (36 characters) - deterministic hash formatted as UUID
 	if len(id1) != 36 {
-		t.Errorf("Expected UUID length 36, got %d", len(id1))
+		t.Errorf("Expected UUID format length 36, got %d", len(id1))
+	}
+
+	// Test with different input produces different ID
+	id3 := generateArticleID("Different Title", link, &publishedAt)
+	if id1 == id3 {
+		t.Error("Expected different IDs for different input")
 	}
 
 	// Test with nil publishedAt
-	id3 := generateArticleID(title, link, nil)
-	if len(id3) != 36 {
-		t.Errorf("Expected UUID length 36 for nil publishedAt, got %d", len(id3))
+	id4 := generateArticleID(title, link, nil)
+	if len(id4) != 36 {
+		t.Errorf("Expected UUID format length 36 for nil publishedAt, got %d", len(id4))
+	}
+
+	// Test with different link produces different ID
+	id5 := generateArticleID(title, "http://different.com/test", &publishedAt)
+	if id1 == id5 {
+		t.Error("Expected different IDs for different link")
+	}
+
+	// Test deterministic behavior - same inputs should always produce same result
+	id6 := generateArticleID(title, link, &publishedAt)
+	if id1 != id6 {
+		t.Error("Expected deterministic behavior - same inputs should produce same result")
 	}
 }
 
