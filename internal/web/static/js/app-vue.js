@@ -7,7 +7,7 @@ const RSSAggregator = {
         const articles = ref([]);
         const topics = ref([]);
         const currentPage = ref(0);
-        const pageSize = ref(20);
+        const pageSize = ref(6); // Will be dynamically calculated based on viewport
         const hasMore = ref(true);
         const loading = ref(false);
         const currentView = ref('all');
@@ -19,15 +19,86 @@ const RSSAggregator = {
 
         // Computed properties
         const filteredArticles = computed(() => {
-            if (!searchQuery.value) return articles.value;
+            const baseArticles = articles.value;
+            console.log('🔍 Filtering articles:', {
+                totalArticles: baseArticles.length,
+                searchQuery: searchQuery.value,
+                hasSearch: !!searchQuery.value
+            });
+            
+            if (!searchQuery.value) return baseArticles;
             
             const query = searchQuery.value.toLowerCase();
-            return articles.value.filter(article => 
+            const filtered = baseArticles.filter(article => 
                 article.title.toLowerCase().includes(query) ||
                 article.description?.toLowerCase().includes(query) ||
                 article.content?.toLowerCase().includes(query)
             );
+            
+            console.log('🔍 Search filtered:', {
+                originalCount: baseArticles.length,
+                filteredCount: filtered.length,
+                searchTerm: query
+            });
+            
+            return filtered;
         });
+
+        // Dynamic page size calculation
+        const calculateOptimalPageSize = () => {
+            // Get viewport dimensions
+            const viewportHeight = window.innerHeight;
+            const viewportWidth = window.innerWidth;
+            
+            // Estimate article card dimensions based on CSS
+            const estimatedCardHeight = 280; // Approximate height including padding, margins
+            const headerHeight = 120; // App header height
+            const sidebarOffset = 60; // Additional offset for sidebar and padding
+            
+            // Calculate available content area height
+            const availableHeight = viewportHeight - headerHeight - sidebarOffset;
+            
+            // Determine grid columns based on viewport width (matching CSS breakpoints)
+            let columns = 3; // Default for large screens
+            if (viewportWidth <= 480) {
+                columns = 1; // Mobile: single column
+            } else if (viewportWidth <= 768) {
+                columns = 1; // Tablet portrait: single column
+            } else if (viewportWidth <= 1200) {
+                columns = 2; // Medium screens: 2 columns
+            } else {
+                columns = 3; // Large screens: 3 columns
+            }
+            
+            // Calculate rows that fit in viewport + some extra for smooth scrolling
+            const rowsThatFit = Math.floor(availableHeight / estimatedCardHeight);
+            const extraRows = Math.max(1, Math.floor(rowsThatFit * 0.5)); // 50% extra for smooth scroll
+            const totalRows = rowsThatFit + extraRows;
+            
+            // Calculate total articles needed - increased minimum to ensure we see more articles
+            const calculatedPageSize = Math.max(12, Math.min(30, totalRows * columns));
+            
+            console.log('🖥️ Dynamic page size calculation:', {
+                viewport: `${viewportWidth}x${viewportHeight}`,
+                layout: `${columns} columns`,
+                availableHeight: `${availableHeight}px`,
+                articlesPerView: `${rowsThatFit} rows × ${columns} cols = ${rowsThatFit * columns}`,
+                withBuffering: `+${extraRows * columns} buffer = ${calculatedPageSize} total`,
+                calculatedPageSize
+            });
+            
+            return calculatedPageSize;
+        };
+
+        // Update page size based on viewport
+        const updatePageSize = () => {
+            const newPageSize = calculateOptimalPageSize();
+            if (newPageSize !== pageSize.value) {
+                const oldSize = pageSize.value;
+                pageSize.value = newPageSize;
+                console.log(`📱 Page size adapted: ${oldSize} → ${newPageSize} articles`);
+            }
+        };
 
         // Methods
         const loadTopics = async () => {
@@ -39,6 +110,31 @@ const RSSAggregator = {
                 topics.value = (data.topics || []).sort((a, b) => a.localeCompare(b));
             } catch (error) {
                 showError('Failed to load topics: ' + error.message);
+            }
+        };
+
+        const loadVersionInfo = async () => {
+            try {
+                const response = await fetch('/version');
+                if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                
+                const data = await response.json();
+                const versionText = `v${data.version} (${data.git_commit?.substring(0, 7) || 'dev'})`;
+                
+                // Update the version info in the footer
+                const versionElement = document.querySelector('.version-number');
+                if (versionElement) {
+                    versionElement.textContent = versionText;
+                    versionElement.title = `Built: ${data.build_time}\nCommit: ${data.git_commit || 'unknown'}`;
+                }
+                
+                console.log('🏷️ Version Info:', data);
+            } catch (error) {
+                console.warn('Failed to load version info:', error.message);
+                const versionElement = document.querySelector('.version-number');
+                if (versionElement) {
+                    versionElement.textContent = 'version unknown';
+                }
             }
         };
 
@@ -63,6 +159,17 @@ const RSSAggregator = {
                 hasMore.value = data.has_more || false;
                 currentPage.value = page;
                 
+                console.log('📰 Loaded all articles:', {
+                    page,
+                    pageSize: pageSize.value,
+                    articlesLoadedThisPage: (data.articles || []).length,
+                    totalArticlesNow: articles.value.length,
+                    hasMore: hasMore.value,
+                    totalCountInDB: data.total_count,
+                    currentView: currentView.value,
+                    sampleTitles: (data.articles || []).slice(0, 3).map(a => a.title?.substring(0, 30) + '...')
+                });
+                
                 // Reset infinite scroll after loading articles
                 if (page === 0) {
                     watchArticles();
@@ -81,7 +188,8 @@ const RSSAggregator = {
             
             try {
                 const skip = page * pageSize.value;
-                const response = await fetch(`/api/v1/articles?$filter=topic eq '${encodeURIComponent(topic)}'&$top=${pageSize.value}&$skip=${skip}&$orderby=published_at desc`);
+                // Use the working topic feed endpoint instead of broken filter
+                const response = await fetch(`/api/v1/feeds/${encodeURIComponent(topic)}?$top=${pageSize.value}&$skip=${skip}&$orderby=published_at desc`);
                 if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 
                 const data = await response.json();
@@ -94,6 +202,14 @@ const RSSAggregator = {
                 
                 hasMore.value = data.has_more || false;
                 currentPage.value = page;
+                
+                console.log('Loaded topic articles:', {
+                    topic,
+                    page,
+                    articlesLoaded: (data.articles || []).length,
+                    totalArticles: articles.value.length,
+                    hasMore: hasMore.value
+                });
                 
                 // Reset infinite scroll after loading articles
                 if (page === 0) {
@@ -120,10 +236,21 @@ const RSSAggregator = {
             watchCurrentView();
         };
 
+        let loadMoreDebounceTimer = null;
+        
         const loadMoreArticles = async () => {
-            if (isLoadingMore.value || !hasMore.value) return;
+            // Debounce rapid scroll events
+            if (loadMoreDebounceTimer) {
+                clearTimeout(loadMoreDebounceTimer);
+            }
             
-            const nextPage = currentPage.value + 1;
+            loadMoreDebounceTimer = setTimeout(async () => {
+                if (isLoadingMore.value || !hasMore.value || loading.value) return;
+                
+                console.log('Loading more articles, page:', currentPage.value + 1);
+                isLoadingMore.value = true;
+                
+                const nextPage = currentPage.value + 1;
             
             try {
                 if (currentView.value === 'all') {
@@ -134,6 +261,7 @@ const RSSAggregator = {
             } finally {
                 isLoadingMore.value = false;
             }
+            }, 150); // 150ms debounce delay for smooth scrolling
         };
 
         const refreshArticles = async () => {
@@ -194,17 +322,34 @@ const RSSAggregator = {
 
         // Lifecycle
         onMounted(() => {
+            // Calculate initial page size based on viewport
+            updatePageSize();
+            
+            // Set up window resize listener for responsive page size
+            const handleResize = () => {
+                updatePageSize();
+            };
+            window.addEventListener('resize', handleResize);
+            
+            // Load initial data
             loadTopics();
             loadAllArticles();
+            loadVersionInfo();
             
             // Setup infinite scroll
             setupInfiniteScroll();
             
             // Setup modal close on outside click
             setupModalHandlers();
+            
+            // Store resize cleanup function
+            resizeCleanup = () => {
+                window.removeEventListener('resize', handleResize);
+            };
         });
 
         // Cleanup function
+        let resizeCleanup = null;
         const cleanup = () => {
             if (infiniteScrollObserver) {
                 infiniteScrollObserver.disconnect();
@@ -213,6 +358,9 @@ const RSSAggregator = {
             if (infiniteScrollTimeout) {
                 clearTimeout(infiniteScrollTimeout);
                 infiniteScrollTimeout = null;
+            }
+            if (resizeCleanup) {
+                resizeCleanup();
             }
         };
 
@@ -235,26 +383,52 @@ const RSSAggregator = {
             // Wait for next tick to ensure DOM is updated
             infiniteScrollTimeout = setTimeout(() => {
                 const sentinel = document.getElementById('infiniteScrollSentinel');
-                if (!sentinel) return;
+                if (!sentinel) {
+                    console.log('DEBUG: Infinite scroll sentinel not found');
+                    return;
+                }
+
+                console.log('DEBUG: Setting up infinite scroll observer', {
+                    hasMore: hasMore.value,
+                    articlesCount: articles.value.length,
+                    sentinelExists: !!sentinel
+                });
 
                 infiniteScrollObserver = new IntersectionObserver((entries) => {
                     entries.forEach(entry => {
+                        console.log('DEBUG: Intersection observed', {
+                            isIntersecting: entry.isIntersecting,
+                            intersectionRatio: entry.intersectionRatio,
+                            hasMore: hasMore.value,
+                            isLoadingMore: isLoadingMore.value,
+                            loading: loading.value,
+                            articlesCount: articles.value.length
+                        });
+                        
                         // Only trigger if we have more articles, not loading, and sentinel is visible
                         if (entry.isIntersecting && 
                             hasMore.value && 
                             !isLoadingMore.value && 
                             !loading.value && 
                             articles.value.length > 0) {
-                            // Set loading state immediately to prevent multiple triggers
-                            isLoadingMore.value = true;
+                            console.log('Infinite scroll triggered', {
+                                hasMore: hasMore.value,
+                                isLoadingMore: isLoadingMore.value,
+                                loading: loading.value,
+                                articlesCount: articles.value.length,
+                                intersectionRatio: entry.intersectionRatio,
+                                boundingRect: entry.boundingClientRect
+                            });
                             loadMoreArticles();
                         }
                     });
                 }, {
-                    rootMargin: '100px'
+                    rootMargin: '800px', // Increased from 100px - load content 800px before user reaches the bottom
+                    threshold: [0, 0.1, 0.5, 1.0] // Multiple thresholds for better detection
                 });
 
                 infiniteScrollObserver.observe(sentinel);
+                console.log('DEBUG: Infinite scroll observer set up successfully');
             }, 100);
         };
 
@@ -276,14 +450,26 @@ const RSSAggregator = {
         };
 
         const showArticleModal = (articleId) => {
+            console.log('Showing modal for article ID:', articleId);
             const article = articles.value.find(a => a.id === articleId);
-            if (!article) return;
+            if (!article) {
+                console.error('Article not found with ID:', articleId);
+                console.log('Available articles:', articles.value.map(a => a.id));
+                return;
+            }
+
+            console.log('Found article:', article.title);
 
             const modal = document.getElementById('articleModal');
             const header = document.getElementById('modalArticleHeader');
             const content = document.getElementById('modalArticleContent');
 
-            if (modal && header && content) {
+            if (!modal || !header || !content) {
+                console.error('Modal elements not found:', { modal: !!modal, header: !!header, content: !!content });
+                return;
+            }
+
+            try {
                 header.innerHTML = `
                     <h2>${escapeHtml(article.title)}</h2>
                     <div class="modal-meta">
@@ -299,6 +485,9 @@ const RSSAggregator = {
                 `;
                 
                 modal.style.display = 'block';
+                console.log('Modal should now be visible');
+            } catch (error) {
+                console.error('Error showing modal:', error);
             }
         };
 
@@ -350,6 +539,7 @@ const RSSAggregator = {
             
             // Methods
             loadTopics,
+            loadVersionInfo,
             loadAllArticles,
             loadTopicArticles,
             showAllArticles,
@@ -370,6 +560,8 @@ const RSSAggregator = {
             setupModalHandlers,
             watchArticles,
             watchCurrentView,
+            updatePageSize,
+            calculateOptimalPageSize,
             cleanup
         };
     },
@@ -508,14 +700,29 @@ const RSSAggregator = {
                     
                     <!-- Infinite Scroll Sentinel -->
                     <div 
-                        v-if="hasMore && !loading && !isLoadingMore && articles.length > 0" 
+                        v-if="hasMore && articles.length > 0" 
                         id="infiniteScrollSentinel" 
                         class="infinite-scroll-loading"
+                        :class="{ 'loading-active': isLoadingMore }"
                     >
-                        <i class="fas fa-spinner fa-spin"></i> Loading more articles...
+                        <div v-if="isLoadingMore" class="loading-content">
+                            <i class="fas fa-spinner fa-spin"></i> 
+                            <span>Loading more articles...</span>
+                        </div>
+                        <div v-else class="loading-trigger">
+                            <!-- This invisible element triggers loading when it comes into view -->
+                        </div>
                     </div>
                 </section>
             </main>
+
+            <!-- Footer with version info -->
+            <footer class="app-footer">
+                <div class="version-info">
+                    <span class="version-text">RSS Aggregator</span>
+                    <span class="version-number" ref="versionInfo">Loading version...</span>
+                </div>
+            </footer>
 
             <!-- Article Modal -->
             <div id="articleModal" class="modal" style="display: none;">

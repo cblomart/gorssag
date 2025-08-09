@@ -459,11 +459,55 @@ body {
     padding: 2rem;
     color: #666;
     font-size: 0.9rem;
+    transition: all 0.3s ease;
+    min-height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.infinite-scroll-loading .loading-content {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    opacity: 1;
+    animation: fadeIn 0.3s ease;
+}
+
+.infinite-scroll-loading .loading-trigger {
+    height: 20px;
+    opacity: 0; /* Invisible trigger element */
+}
+
+.infinite-scroll-loading.loading-active {
+    background: linear-gradient(90deg, transparent, rgba(102, 126, 234, 0.1), transparent);
+    border-radius: 8px;
 }
 
 .infinite-scroll-loading i {
     margin-right: 0.5rem;
     color: #667eea;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 /* Modal styles */
@@ -1417,18 +1461,38 @@ body {
     color: white;
 }
 
-/* Infinite Scroll Loading */
-.infinite-scroll-loading {
+/* Duplicate styles removed - see main infinite scroll styles above */
+
+/* Footer with version info */
+.app-footer {
+    background: #f8f9fa;
+    border-top: 1px solid #e9ecef;
+    padding: 1rem 2rem;
+    margin-top: 2rem;
     text-align: center;
-    padding: 20px;
-    color: #666;
-    font-size: 0.9rem;
 }
 
-.infinite-scroll-loading.loading {
-    color: #007bff;
+.version-info {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: #6c757d;
 }
 
-.infinite-scroll-loading i {
-    margin-right: 8px;
+.version-text {
+    font-weight: 500;
+}
+
+.version-number {
+    background: #e9ecef;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-family: 'Courier New', monospace;
+    cursor: help;
+}
+
+.version-number:hover {
+    background: #dee2e6;
 } 

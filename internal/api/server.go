@@ -6,7 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -83,6 +85,9 @@ func (s *Server) setupRoutes() {
 	// Health check
 	s.router.GET("/health", s.healthCheck)
 
+	// Version endpoint
+	s.router.GET("/version", s.getVersion)
+
 	// API routes
 	api := s.router.Group("/api/v1")
 	{
@@ -149,11 +154,106 @@ func (s *Server) StartWithContext(ctx context.Context) error {
 	return context.Canceled
 }
 
+// Version information - detected at runtime
+var (
+	Version   = getVersion()
+	BuildTime = getBuildTime()
+	GitCommit = getGitCommit()
+)
+
+// getVersion attempts to detect version from multiple sources
+func getVersion() string {
+	// 1. Check environment variable (for manual override)
+	if version := os.Getenv("APP_VERSION"); version != "" {
+		return version
+	}
+
+	// 2. Try to get from git (if available)
+	if cmd := exec.Command("git", "describe", "--tags", "--always", "--dirty"); cmd.Err == nil {
+		if output, err := cmd.Output(); err == nil {
+			if version := strings.TrimSpace(string(output)); version != "" {
+				return version
+			}
+		}
+	}
+
+	// 3. Try to get from build info (Go modules)
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" && info.Main.Version != "(devel)" {
+			return info.Main.Version
+		}
+	}
+
+	// 4. Default fallback
+	return "dev"
+}
+
+// getBuildTime returns the build time
+func getBuildTime() string {
+	// 1. Check environment variable
+	if buildTime := os.Getenv("BUILD_TIME"); buildTime != "" {
+		return buildTime
+	}
+
+	// 2. Try to get from build info
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.time" {
+				return setting.Value
+			}
+		}
+	}
+
+	// 3. Default to startup time
+	return time.Now().UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+// getGitCommit returns the git commit hash
+func getGitCommit() string {
+	// 1. Check environment variable
+	if gitCommit := os.Getenv("GIT_COMMIT"); gitCommit != "" {
+		return gitCommit
+	}
+
+	// 2. Try to get from git command
+	if cmd := exec.Command("git", "rev-parse", "HEAD"); cmd.Err == nil {
+		if output, err := cmd.Output(); err == nil {
+			if commit := strings.TrimSpace(string(output)); commit != "" {
+				return commit
+			}
+		}
+	}
+
+	// 3. Try to get from build info
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				return setting.Value
+			}
+		}
+	}
+
+	// 4. Default fallback
+	return "unknown"
+}
+
 func (s *Server) healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":        "healthy",
 		"service":       "rss-aggregator",
+		"version":       Version,
+		"build_time":    BuildTime,
+		"git_commit":    GitCommit,
 		"poller_active": s.poller.IsPolling(),
+	})
+}
+
+func (s *Server) getVersion(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"service":    "rss-aggregator",
+		"version":    Version,
+		"build_time": BuildTime,
+		"git_commit": GitCommit,
 	})
 }
 
@@ -290,106 +390,25 @@ func (s *Server) getAllArticles(c *gin.Context) {
 
 		log.Printf("DEBUG: Got %d articles for topic %s", len(allArticles), targetTopic)
 	} else {
-		// No topic filter - get articles from all topics
-		log.Printf("DEBUG: Getting articles from all topics")
+		// No topic filter - get ALL articles directly from storage without topic filtering
+		log.Printf("DEBUG: Getting ALL articles from storage (no topic filtering)")
 
-		topics := s.aggregator.GetAvailableTopics()
-		log.Printf("DEBUG: Found %d topics: %v", len(topics), topics)
-
-		for i, topic := range topics {
-			log.Printf("DEBUG: Processing topic %d/%d: %s", i+1, len(topics), topic)
-
-			// Create a topic-specific query
-			topicQuery := &models.ODataQuery{
-				Filter:  query.Filter,
-				OrderBy: query.OrderBy,
-				Select:  query.Select,
-				Search:  query.Search,
-				// Don't apply pagination at topic level, we'll do it globally
-			}
-
-			// Add timeout context to prevent hanging
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			// Use a channel to handle the async call with timeout
-			resultChan := make(chan struct {
-				feed *models.AggregatedFeed
-				err  error
-			}, 1)
-
-			go func(t string, q *models.ODataQuery) {
-				feed, err := s.aggregator.GetAggregatedFeed(t, q)
-				resultChan <- struct {
-					feed *models.AggregatedFeed
-					err  error
-				}{feed, err}
-			}(topic, topicQuery)
-
-			select {
-			case result := <-resultChan:
-				if result.err != nil {
-					log.Printf("Warning: failed to get feed for topic '%s': %v", topic, result.err)
-					continue
-				}
-				if result.feed == nil {
-					log.Printf("Warning: feed is nil for topic '%s'", topic)
-					continue
-				}
-
-				// Add topic information to each article
-				for i := range result.feed.Articles {
-					result.feed.Articles[i].Topic = topic
-				}
-
-				log.Printf("DEBUG: Got %d articles for topic %s", len(result.feed.Articles), topic)
-				allArticles = append(allArticles, result.feed.Articles...)
-				totalCount += len(result.feed.Articles)
-
-			case <-ctx.Done():
-				log.Printf("Warning: timeout getting feed for topic '%s'", topic)
-				continue
-			}
+		var err error
+		allArticles, totalCount, err = s.aggregator.GetAllArticles(query)
+		if err != nil {
+			log.Printf("Error getting all articles: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve articles"})
+			return
 		}
 
-		log.Printf("DEBUG: Total articles collected: %d", len(allArticles))
-
-		// Apply advanced filtering
-		allArticles = s.applyAdvancedFilters(allArticles, query)
-
-		// Apply search filtering
-		if len(query.Search) > 0 {
-			allArticles = searchArticles(allArticles, query.Search)
-		}
-
-		// Apply sorting
-		if query.OrderBy == "" {
-			query.OrderBy = "published_at desc"
-		}
-		if query.OrderBy != "" {
-			allArticles = sortArticles(allArticles, query.OrderBy)
-		}
-
-		// Apply field selection
-		if len(query.Select) > 0 {
-			allArticles = applySelectFields(allArticles, query.Select)
-		}
+		log.Printf("DEBUG: Got %d articles total from storage", totalCount)
 	}
 
-	// Apply pagination (always executed)
-	totalCount = len(allArticles)
-	start := query.Skip
-	end := start + query.Top
-	if end > totalCount {
-		end = totalCount
-	}
-	if start < totalCount {
-		allArticles = allArticles[start:end]
-	} else {
-		allArticles = []models.Article{}
-	}
+	// Calculate has_more correctly: true if there are more articles beyond the current page
+	hasMore := (query.Skip + len(allArticles)) < totalCount
 
-	log.Printf("DEBUG: Final result: %d articles", len(allArticles))
+	log.Printf("DEBUG: Final result: %d articles, totalCount: %d, skip: %d, top: %d, hasMore: %v",
+		len(allArticles), totalCount, query.Skip, query.Top, hasMore)
 
 	c.JSON(http.StatusOK, gin.H{
 		"articles":    allArticles,
@@ -397,7 +416,7 @@ func (s *Server) getAllArticles(c *gin.Context) {
 		"total_count": totalCount,
 		"skip":        query.Skip,
 		"top":         query.Top,
-		"has_more":    end < totalCount,
+		"has_more":    hasMore,
 	})
 }
 

@@ -2,87 +2,20 @@ version: '3.8'
 
 services:
   rss-aggregator:
-    image: gorssag:latest  # Change to ghcr.io/cblomart/gorssag:latest for registry image
+    image: ghcr.io/cblomart/gorssag:latest
     ports:
       - "8080:8080"
-    environment:
-      # Basic Configuration
-      - PORT=8080
-      - CACHE_TTL=15m
-      - DATA_DIR=/app/data
-      - LOG_LEVEL=info
-      - POLL_INTERVAL=15m
-      - ARTICLE_RETENTION=720h
-      - ENABLE_SPA=true
-      - ENABLE_SWAGGER=true
-      
-      # Storage Optimization Configuration
-      - ENABLE_CONTENT_COMPRESSION=false
-      - MAX_CONTENT_LENGTH=10000
-      - ENABLE_DUPLICATE_REMOVAL=true
-      - DATABASE_OPTIMIZE_INTERVAL=3600
-      - FORCE_DB_RECREATE=false
-      
-      # Security Configuration
-      - ENABLE_RATE_LIMIT=true
-      - RATE_LIMIT_PER_SECOND=10.0
-      - RATE_LIMIT_BURST=20
-      - ENABLE_CORS=true
-      - ALLOWED_ORIGINS=*
-      - ENABLE_SECURITY_HEADERS=true
-      - MAX_REQUEST_SIZE=10485760
-      - ENABLE_REQUEST_ID=true
-      
-      # RSS Feed Configuration
-      # Format: FEED_TOPIC_<TOPIC>=url1,url2,url3|filter1,filter2,filter3
-      - FEED_TOPIC_TECH=https://feeds.feedburner.com/TechCrunch,https://feeds.arstechnica.com/arstechnica/index,https://feeds.feedburner.com/TheHackersNews|AI,artificial intelligence,machine learning,blockchain,cryptocurrency
-      - FEED_TOPIC_NEWS=https://feeds.npr.org/1001/rss.xml,https://feeds.feedburner.com/TheHackersNews,https://feeds.bbci.co.uk/news/rss.xml|technology,innovation,digital,startup,cybersecurity
-      - FEED_TOPIC_PROGRAMMING=https://blog.golang.org/feed.atom,https://feeds.feedburner.com/oreilly/go,https://www.reddit.com/r/golang/.rss|Go,golang,programming,development,software
-      - FEED_TOPIC_CRYPTOS=https://feeds.feedburner.com/TheHackersNews,https://feeds.npr.org/1001/rss.xml,https://feeds.bbci.co.uk/news/rss.xml|bitcoin,btc,crypto,cryptocurrency,ethereum,blockchain
     volumes:
       - rss_data:/app/data
-    networks:
-      - rss_network
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-    deploy:
-      mode: replicated
-      replicas: 2
-      placement:
-        constraints:
-          - node.role == worker
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-        window: 120s
-      update_config:
-        parallelism: 1
-        delay: 10s
-        failure_action: rollback
-        order: start-first
-      rollback_config:
-        parallelism: 1
-        delay: 10s
-        failure_action: pause
-        order: stop-first
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
-        reservations:
-          cpus: '0.25'
-          memory: 128M
 
 volumes:
   rss_data:
-    driver: local
-
-networks:
-  rss_network:
-    driver: overlay
-    attachable: true

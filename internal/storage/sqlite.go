@@ -192,7 +192,22 @@ func createTables(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_search_index_article_term ON search_index(article_id, search_term);
 	CREATE INDEX IF NOT EXISTS idx_search_index_term_lang ON search_index(search_term, language);
 	CREATE INDEX IF NOT EXISTS idx_search_index_field ON search_index(field_type);
-	CREATE INDEX IF NOT EXISTS idx_search_index_language ON search_index(language);`
+	CREATE INDEX IF NOT EXISTS idx_search_index_language ON search_index(language);
+
+	-- Article-Topic membership table for many-to-many relationships
+	CREATE TABLE IF NOT EXISTS article_topics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		article_id TEXT NOT NULL,
+		topic_id INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (article_id) REFERENCES articles(article_id) ON DELETE CASCADE,
+		FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE,
+		UNIQUE(article_id, topic_id) -- Prevent duplicate assignments
+	);
+
+	-- Indexes for efficient topic membership queries
+	CREATE INDEX IF NOT EXISTS idx_article_topics_article ON article_topics(article_id);
+	CREATE INDEX IF NOT EXISTS idx_article_topics_topic ON article_topics(topic_id);`
 
 	// Create indexes for fast OData queries
 	indexes := []string{
@@ -718,6 +733,176 @@ func (s *SQLiteStorage) QueryArticles(topic string, query *models.ODataQuery) ([
 	}
 
 	return articles, nil
+}
+
+// GetAllArticles returns all articles across all topics without topic filtering
+func (s *SQLiteStorage) GetAllArticles(query *models.ODataQuery) ([]models.Article, int, error) {
+	// Build SQL query for all articles without topic filtering
+	baseQuery := `
+		SELECT 
+			a.article_id, 
+			a.title, 
+			a.description, 
+			a.content, 
+			a.link, 
+			a.author, 
+			a.source, 
+			a.published_at, 
+			a.categories, 
+			a.language,
+			t.name as topic,
+			cc.compressed_content
+		FROM articles a
+		LEFT JOIN topics t ON a.topic_id = t.id
+		LEFT JOIN compressed_content cc ON a.article_id = cc.article_id
+		WHERE 1=1
+	`
+	args := []interface{}{}
+
+	// Add search conditions
+	if len(query.Search) > 0 {
+		searchConditions := make([]string, len(query.Search))
+		for i, term := range query.Search {
+			searchConditions[i] = "(a.title LIKE ? OR a.description LIKE ? OR a.content LIKE ? OR a.author LIKE ? OR a.source LIKE ?)"
+			args = append(args, "%"+term+"%", "%"+term+"%", "%"+term+"%", "%"+term+"%", "%"+term+"%")
+		}
+		baseQuery += " AND (" + strings.Join(searchConditions, " OR ") + ")"
+	}
+
+	// Add filter conditions
+	if query.Filter != "" {
+		baseQuery += " AND (a.title LIKE ? OR a.description LIKE ? OR a.content LIKE ? OR a.author LIKE ?)"
+		args = append(args, "%"+query.Filter+"%", "%"+query.Filter+"%", "%"+query.Filter+"%", "%"+query.Filter+"%")
+	}
+
+	// Count total articles for pagination (before LIMIT/OFFSET)
+	countQuery := `
+		SELECT COUNT(DISTINCT a.article_id) 
+		FROM articles a
+		LEFT JOIN topics t ON a.topic_id = t.id
+		LEFT JOIN compressed_content cc ON a.article_id = cc.article_id
+		WHERE 1=1
+	`
+	countArgs := []interface{}{}
+
+	// Apply the same search conditions to count query
+	if len(query.Search) > 0 {
+		searchConditions := make([]string, len(query.Search))
+		for i, term := range query.Search {
+			searchConditions[i] = "(a.title LIKE ? OR a.description LIKE ? OR a.content LIKE ? OR a.author LIKE ? OR a.source LIKE ?)"
+			countArgs = append(countArgs, "%"+term+"%", "%"+term+"%", "%"+term+"%", "%"+term+"%", "%"+term+"%")
+		}
+		countQuery += " AND (" + strings.Join(searchConditions, " OR ") + ")"
+	}
+
+	// Apply the same filter conditions to count query
+	if query.Filter != "" {
+		countQuery += " AND (a.title LIKE ? OR a.description LIKE ? OR a.content LIKE ? OR a.author LIKE ?)"
+		countArgs = append(countArgs, "%"+query.Filter+"%", "%"+query.Filter+"%", "%"+query.Filter+"%", "%"+query.Filter+"%")
+	}
+
+	var totalCount int
+	err := s.db.QueryRow(countQuery, countArgs...).Scan(&totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count articles: %v", err)
+	}
+
+	// Add ordering
+	if query.OrderBy != "" {
+		baseQuery += " ORDER BY " + s.parseOrderBy(query.OrderBy)
+	} else {
+		baseQuery += " ORDER BY a.published_at DESC"
+	}
+
+	// Add pagination - LIMIT must come before OFFSET in SQLite
+	if query.Top > 0 {
+		baseQuery += " LIMIT ?"
+		args = append(args, query.Top)
+		if query.Skip > 0 {
+			baseQuery += " OFFSET ?"
+			args = append(args, query.Skip)
+		}
+	} else if query.Skip > 0 {
+		// If only skip is specified, we need a default limit
+		baseQuery += " LIMIT -1 OFFSET ?"
+		args = append(args, query.Skip)
+	}
+
+	// Execute query
+	rows, err := s.db.Query(baseQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query all articles: %v", err)
+	}
+	defer rows.Close()
+
+	var articles []models.Article
+	for rows.Next() {
+		var article models.Article
+		var content string
+		var categoriesJSON sql.NullString
+		var language sql.NullString
+		var topic sql.NullString
+		var compressedContent sql.NullString
+
+		err = rows.Scan(
+			&article.ID,
+			&article.Title,
+			&article.Description,
+			&content,
+			&article.Link,
+			&article.Author,
+			&article.Source,
+			&article.PublishedAt,
+			&categoriesJSON,
+			&language,
+			&topic,
+			&compressedContent,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan article: %v", err)
+		}
+
+		// Handle content (regular or compressed)
+		article.Content = content
+		if article.Content == "" && compressedContent.Valid {
+			decompressed, err := decompressContent([]byte(compressedContent.String))
+			if err != nil {
+				log.Printf("Warning: failed to decompress content for article %s: %v", article.ID, err)
+				article.Content = "Content unavailable (decompression failed)"
+			} else {
+				article.Content = decompressed
+			}
+		} else if article.Content == "" {
+			article.Content = "Content unavailable"
+		}
+
+		// Parse categories JSON
+		if categoriesJSON.Valid {
+			if err := json.Unmarshal([]byte(categoriesJSON.String), &article.Categories); err != nil {
+				log.Printf("Warning: failed to parse categories for article %s: %v", article.ID, err)
+				article.Categories = []string{}
+			}
+		}
+
+		// Set language and topic
+		if language.Valid {
+			article.Language = language.String
+		} else {
+			article.Language = "en"
+		}
+
+		if topic.Valid {
+			article.Topic = topic.String
+		}
+
+		articles = append(articles, article)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error during rows iteration: %v", err)
+	}
+
+	return articles, totalCount, nil
 }
 
 func (s *SQLiteStorage) buildODataQuery(topicID int, query *models.ODataQuery) (string, []interface{}) {
@@ -1680,4 +1865,305 @@ func (s *SQLiteStorage) GetFeedStats() (map[string]interface{}, error) {
 	return map[string]interface{}{
 		"feeds": feeds,
 	}, nil
+}
+
+// SaveArticles saves articles independently of topics (new approach)
+func (s *SQLiteStorage) SaveArticles(articles []models.Article) error {
+	if len(articles) == 0 {
+		return nil
+	}
+
+	log.Printf("SaveArticles: Starting to save %d articles independently", len(articles))
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	// Use INSERT OR REPLACE to handle duplicates gracefully
+	// Set topic_id to 1 temporarily (will be updated later by AssignArticlesToTopic)
+	stmt, err := tx.Prepare(`
+		INSERT OR REPLACE INTO articles (article_id, topic_id, title, link, description, content, author, source, categories, published_at, language)
+		VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert statement: %v", err)
+	}
+	defer stmt.Close()
+
+	successCount := 0
+	for _, article := range articles {
+		categoriesJSON, _ := json.Marshal(article.Categories)
+		content := cleanAndOptimizeContent(article.Content)
+		articleLanguage := s.detectLanguage(article.Title + " " + article.Description + " " + article.Content)
+
+		_, err = stmt.Exec(article.ID, article.Title, article.Link, article.Description, content, article.Author, article.Source, categoriesJSON, article.PublishedAt, articleLanguage)
+		if err != nil {
+			log.Printf("Warning: failed to insert article %s: %v", article.ID, err)
+			continue // Continue with other articles instead of failing completely
+		}
+
+		// Update search index
+		if err := s.updateSearchIndexWithTx(tx, article.ID, article.Title, article.Description, content, article.Author, article.Source); err != nil {
+			log.Printf("Warning: failed to update search index for article %s: %v", article.ID, err)
+		}
+
+		successCount++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	log.Printf("SaveArticles: Successfully saved %d/%d articles", successCount, len(articles))
+	return nil
+}
+
+// AssignArticlesToTopic assigns articles to a topic after they're stored
+func (s *SQLiteStorage) AssignArticlesToTopic(articleIDs []string, topic string) error {
+	if len(articleIDs) == 0 {
+		return nil
+	}
+
+	log.Printf("AssignArticlesToTopic: Assigning %d articles to topic '%s'", len(articleIDs), topic)
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	// Get or create topic
+	topicID, err := s.getOrCreateTopic(tx, topic)
+	if err != nil {
+		return err
+	}
+
+	// Use the new article_topics table for many-to-many relationships
+	stmt, err := tx.Prepare("INSERT OR IGNORE INTO article_topics (article_id, topic_id) VALUES (?, ?)")
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert statement: %v", err)
+	}
+	defer stmt.Close()
+
+	// Also update the legacy topic_id column for backward compatibility
+	legacyStmt, err := tx.Prepare("UPDATE articles SET topic_id = ? WHERE article_id = ? AND topic_id = 1")
+	if err != nil {
+		return fmt.Errorf("failed to prepare legacy update statement: %v", err)
+	}
+	defer legacyStmt.Close()
+
+	successCount := 0
+	for _, articleID := range articleIDs {
+		// Insert into membership table
+		_, err = stmt.Exec(articleID, topicID)
+		if err != nil {
+			log.Printf("Warning: failed to assign article %s to topic %s: %v", articleID, topic, err)
+			continue
+		}
+
+		// Update legacy column only if it's still set to the default (1)
+		_, _ = legacyStmt.Exec(topicID, articleID)
+
+		successCount++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	log.Printf("AssignArticlesToTopic: Successfully assigned %d/%d articles to topic '%s'", successCount, len(articleIDs), topic)
+	return nil
+}
+
+// AddArticleToTopic adds a single article to a topic
+func (s *SQLiteStorage) AddArticleToTopic(articleID string, topic string) error {
+	return s.AssignArticlesToTopic([]string{articleID}, topic)
+}
+
+// RemoveArticleFromTopic removes an article from a topic
+func (s *SQLiteStorage) RemoveArticleFromTopic(articleID string, topic string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	// Get topic ID
+	var topicID int
+	err = tx.QueryRow("SELECT id FROM topics WHERE name = ?", topic).Scan(&topicID)
+	if err != nil {
+		return fmt.Errorf("topic not found: %v", err)
+	}
+
+	// Remove from membership table
+	_, err = tx.Exec("DELETE FROM article_topics WHERE article_id = ? AND topic_id = ?", articleID, topicID)
+	if err != nil {
+		return fmt.Errorf("failed to remove article from topic: %v", err)
+	}
+
+	return tx.Commit()
+}
+
+// GetArticleTopics returns all topics for an article
+func (s *SQLiteStorage) GetArticleTopics(articleID string) ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT t.name 
+		FROM topics t 
+		JOIN article_topics at ON t.id = at.topic_id 
+		WHERE at.article_id = ?
+		ORDER BY t.name
+	`, articleID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query article topics: %v", err)
+	}
+	defer rows.Close()
+
+	var topics []string
+	for rows.Next() {
+		var topic string
+		if err := rows.Scan(&topic); err != nil {
+			return nil, fmt.Errorf("failed to scan topic: %v", err)
+		}
+		topics = append(topics, topic)
+	}
+
+	return topics, nil
+}
+
+// GetTopicArticles returns articles for a topic using the membership table
+func (s *SQLiteStorage) GetTopicArticles(topic string, query *models.ODataQuery) ([]models.Article, int, error) {
+	// This method uses the new article_topics table instead of the legacy topic_id column
+	baseQuery := `
+		SELECT 
+			a.article_id, 
+			a.title, 
+			a.description, 
+			a.content, 
+			a.link, 
+			a.author, 
+			a.source, 
+			a.published_at, 
+			a.categories, 
+			a.language,
+			cc.compressed_content
+		FROM articles a
+		JOIN article_topics at ON a.article_id = at.article_id
+		JOIN topics t ON at.topic_id = t.id
+		LEFT JOIN compressed_content cc ON a.article_id = cc.article_id
+		WHERE t.name = ?
+	`
+
+	// Count query for pagination
+	countQuery := `
+		SELECT COUNT(DISTINCT a.article_id)
+		FROM articles a
+		JOIN article_topics at ON a.article_id = at.article_id
+		JOIN topics t ON at.topic_id = t.id
+		WHERE t.name = ?
+	`
+
+	args := []interface{}{topic}
+	countArgs := []interface{}{topic}
+
+	// Add search conditions if specified
+	if len(query.Search) > 0 {
+		searchConditions := make([]string, len(query.Search))
+		for i, term := range query.Search {
+			searchConditions[i] = "(a.title LIKE ? OR a.description LIKE ? OR a.content LIKE ?)"
+			searchTerm := "%" + term + "%"
+			args = append(args, searchTerm, searchTerm, searchTerm)
+			countArgs = append(countArgs, searchTerm, searchTerm, searchTerm)
+		}
+		searchClause := " AND (" + strings.Join(searchConditions, " OR ") + ")"
+		baseQuery += searchClause
+		countQuery += searchClause
+	}
+
+	// Get total count
+	var totalCount int
+	err := s.db.QueryRow(countQuery, countArgs...).Scan(&totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count articles: %v", err)
+	}
+
+	// Add ordering
+	if query.OrderBy != "" {
+		if strings.Contains(strings.ToLower(query.OrderBy), "desc") {
+			baseQuery += " ORDER BY a.published_at DESC"
+		} else {
+			baseQuery += " ORDER BY a.published_at ASC"
+		}
+	} else {
+		baseQuery += " ORDER BY a.published_at DESC" // Default ordering
+	}
+
+	// Add pagination - LIMIT must come before OFFSET in SQLite
+	if query.Top > 0 {
+		baseQuery += " LIMIT ?"
+		args = append(args, query.Top)
+		if query.Skip > 0 {
+			baseQuery += " OFFSET ?"
+			args = append(args, query.Skip)
+		}
+	} else if query.Skip > 0 {
+		// If only skip is specified, we need a default limit
+		baseQuery += " LIMIT -1 OFFSET ?"
+		args = append(args, query.Skip)
+	}
+
+	// Execute query
+	rows, err := s.db.Query(baseQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query topic articles: %v", err)
+	}
+	defer rows.Close()
+
+	var articles []models.Article
+	for rows.Next() {
+		var article models.Article
+		var compressedContent []byte
+		var categoriesJSON string
+
+		err := rows.Scan(
+			&article.ID,
+			&article.Title,
+			&article.Description,
+			&article.Content,
+			&article.Link,
+			&article.Author,
+			&article.Source,
+			&article.PublishedAt,
+			&categoriesJSON,
+			&article.Language,
+			&compressedContent,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan article: %v", err)
+		}
+
+		// Handle compressed content
+		if len(compressedContent) > 0 && article.Content == "" {
+			if decompressed, err := decompressContent(compressedContent); err == nil {
+				article.Content = decompressed
+			}
+		}
+
+		// Parse categories JSON
+		if categoriesJSON != "" {
+			json.Unmarshal([]byte(categoriesJSON), &article.Categories)
+		}
+
+		articles = append(articles, article)
+	}
+
+	return articles, totalCount, nil
+}
+
+// GetCombinedFilters combines filters from multiple topics
+func (s *SQLiteStorage) GetCombinedFilters(topics []string) ([]string, bool) {
+	// This method would ideally read topic configurations from database
+	// For now, we'll implement the logic in the aggregator layer
+	return nil, false
 }

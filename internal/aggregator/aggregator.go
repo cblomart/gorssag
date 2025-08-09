@@ -1,6 +1,7 @@
 package aggregator
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"net/http"
@@ -84,6 +85,50 @@ func (a *Aggregator) GetConfig() map[string]config.TopicConfig {
 	return a.feeds
 }
 
+// GetAllArticles returns all articles from storage without topic filtering
+func (a *Aggregator) GetAllArticles(query *models.ODataQuery) ([]models.Article, int, error) {
+	return a.storage.GetAllArticles(query)
+}
+
+// GetCombinedFilters combines all topic filters for a feed
+func (a *Aggregator) GetCombinedFilters(feedURL string) ([]string, bool) {
+	topics := a.GetTopicsForFeed(feedURL)
+	if len(topics) == 0 {
+		return nil, false
+	}
+
+	var allFilters []string
+	hasEmptyFilter := false
+
+	for _, topic := range topics {
+		if topicConfig, exists := a.feeds[topic]; exists {
+			if len(topicConfig.Filters) == 0 {
+				// If ANY topic has no filters, we should return ALL articles
+				hasEmptyFilter = true
+				break
+			}
+			allFilters = append(allFilters, topicConfig.Filters...)
+		}
+	}
+
+	// If any topic has empty filter, return no filter (get everything)
+	if hasEmptyFilter {
+		return nil, true // true means "no filter - get everything"
+	}
+
+	// Remove duplicates from combined filters
+	filterSet := make(map[string]bool)
+	var uniqueFilters []string
+	for _, filter := range allFilters {
+		if !filterSet[filter] {
+			filterSet[filter] = true
+			uniqueFilters = append(uniqueFilters, filter)
+		}
+	}
+
+	return uniqueFilters, false
+}
+
 // GetAllUniqueFeedURLs returns all unique RSS feed URLs across all topics
 func (a *Aggregator) GetAllUniqueFeedURLs() []string {
 	urlSet := make(map[string]bool)
@@ -122,7 +167,7 @@ func (a *Aggregator) GetTopicsForFeed(feedURL string) []string {
 	return topics
 }
 
-// PollFeed polls a single feed and stores articles centrally
+// PollFeed polls a single feed and stores articles using the new architecture
 func (a *Aggregator) PollFeed(feedURL string) error {
 	// Check if we should retry this feed
 	if !a.ShouldRetryFeed(feedURL) {
@@ -131,6 +176,10 @@ func (a *Aggregator) PollFeed(feedURL string) error {
 			return fmt.Errorf("feed is disabled: %s", status.DisabledReason)
 		}
 	}
+
+	// Get combined filters for this feed from all topics that use it
+	combinedFilters, noFilter := a.GetCombinedFilters(feedURL)
+	log.Printf("PollFeed %s: Combined filters: %v, noFilter: %v", feedURL, combinedFilters, noFilter)
 
 	// Get stored User-Agent for this feed
 	status, exists := a.feedStatus[feedURL]
@@ -179,7 +228,9 @@ func (a *Aggregator) PollFeed(feedURL string) error {
 	}
 
 	// Process articles from the feed
-	var newArticles []models.Article
+	var allArticles []models.Article
+	var filteredArticles []models.Article
+
 	for _, item := range feed.Items {
 		// Skip items without required fields
 		if item.Title == "" {
@@ -219,46 +270,73 @@ func (a *Aggregator) PollFeed(feedURL string) error {
 			Categories:  item.Categories,
 		}
 
-		// Store article centrally (will overwrite if already exists, ensuring consistent ID)
-		a.allArticles[articleID] = article
-		newArticles = append(newArticles, article)
-	}
+		allArticles = append(allArticles, article)
 
-	// Update feed articles mapping
-	var articleIDs []string
-	for _, article := range newArticles {
-		articleIDs = append(articleIDs, article.ID)
-	}
-	a.feedArticles[feedURL] = articleIDs
-
-	// Update feed status
-	a.UpdateFeedStatus(feedURL, "", len(newArticles), nil)
-	a.lastFeedPoll[feedURL] = time.Now()
-
-	// Save to storage for each topic that uses this feed
-	topics := a.GetTopicsForFeed(feedURL)
-	for _, topic := range topics {
-		// Apply topic-specific filters
-		topicConfig := a.feeds[topic]
-		filteredArticles := a.filterArticlesForTopic(newArticles, topicConfig.Filters)
-
-		if len(filteredArticles) > 0 {
-			// Create aggregated feed for storage
-			aggregatedFeed := &models.AggregatedFeed{
-				Topic:    topic,
-				Articles: filteredArticles,
-				Count:    len(filteredArticles),
-				Updated:  time.Now(),
-			}
-
-			err := a.storage.SaveFeed(topic, aggregatedFeed)
-			if err != nil {
-				log.Printf("Error saving articles for topic %s: %v", topic, err)
+		// Apply combined filtering ONLY if there are filters
+		if noFilter || len(combinedFilters) == 0 {
+			// No filtering - include all articles
+			filteredArticles = append(filteredArticles, article)
+		} else {
+			// Apply combined filters
+			if a.articleMatchesFilters(article, combinedFilters) {
+				filteredArticles = append(filteredArticles, article)
 			}
 		}
 	}
 
-	log.Printf("Polled feed %s: %d articles, %d topics affected", feedURL, len(newArticles), len(topics))
+	log.Printf("PollFeed %s: %d total articles, %d after filtering", feedURL, len(allArticles), len(filteredArticles))
+
+	// Store articles centrally in memory for immediate access
+	for _, article := range filteredArticles {
+		a.allArticles[article.ID] = article
+	}
+
+	// Update feed articles mapping
+	var articleIDs []string
+	for _, article := range filteredArticles {
+		articleIDs = append(articleIDs, article.ID)
+	}
+	a.feedArticles[feedURL] = articleIDs
+
+	// 🎯 NEW ARCHITECTURE: Save articles first, then assign topic memberships
+	if len(filteredArticles) > 0 {
+		// Step 1: Save all articles to storage WITHOUT topic assignment
+		err := a.storage.SaveArticles(filteredArticles)
+		if err != nil {
+			log.Printf("Error saving articles from feed %s: %v", feedURL, err)
+			// Don't return error - continue with topic assignment for articles that might have been saved
+		}
+
+		// Step 2: THEN assign articles to topics based on their individual filters
+		topics := a.GetTopicsForFeed(feedURL)
+		for _, topic := range topics {
+			topicConfig := a.feeds[topic]
+			var topicArticleIDs []string
+
+			for _, article := range filteredArticles {
+				// Apply topic-specific filters
+				if len(topicConfig.Filters) == 0 || a.articleMatchesFilters(article, topicConfig.Filters) {
+					topicArticleIDs = append(topicArticleIDs, article.ID)
+				}
+			}
+
+			if len(topicArticleIDs) > 0 {
+				err := a.storage.AssignArticlesToTopic(topicArticleIDs, topic)
+				if err != nil {
+					log.Printf("Error assigning articles to topic %s: %v", topic, err)
+				} else {
+					log.Printf("Assigned %d articles to topic %s", len(topicArticleIDs), topic)
+				}
+			}
+		}
+	}
+
+	// Update feed status
+	a.UpdateFeedStatus(feedURL, "", len(filteredArticles), nil)
+	a.lastFeedPoll[feedURL] = time.Now()
+
+	topics := a.GetTopicsForFeed(feedURL)
+	log.Printf("Polled feed %s: %d articles, %d topics affected", feedURL, len(filteredArticles), len(topics))
 	return nil
 }
 
@@ -439,7 +517,28 @@ func convertHTMLToMarkdown(html string) string {
 }
 
 func generateArticleID(title, link string, publishedAt *time.Time) string {
-	// Generate a proper UUID for the article
+	// Generate a deterministic ID based on content to enable deduplication
+	// Use title + link as the primary key for deduplication
+	// This ensures the same article from multiple feeds gets the same ID
+
+	// Normalize the title and link for consistent hashing
+	normalizedTitle := strings.TrimSpace(strings.ToLower(title))
+	normalizedLink := strings.TrimSpace(strings.ToLower(link))
+
+	// Create a hash of the normalized content
+	hasher := sha256.New()
+	hasher.Write([]byte(normalizedTitle + "|" + normalizedLink))
+	hash := fmt.Sprintf("%x", hasher.Sum(nil))
+
+	// Convert to UUID format for consistency with existing code
+	// Use first 32 characters and format as UUID
+	if len(hash) >= 32 {
+		formatted := fmt.Sprintf("%s-%s-%s-%s-%s",
+			hash[0:8], hash[8:12], hash[12:16], hash[16:20], hash[20:32])
+		return formatted
+	}
+
+	// Fallback to random UUID if something goes wrong
 	return uuid.New().String()
 }
 
@@ -857,7 +956,6 @@ func (a *Aggregator) fetchFeed(url string, topic string) ([]models.Article, erro
 			return nil, fmt.Errorf("feed is disabled: %s", status.DisabledReason)
 		}
 	}
-
 
 	status, exists := a.feedStatus[url]
 	var userAgent string
